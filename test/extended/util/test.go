@@ -7,13 +7,14 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/config"
 	"github.com/onsi/ginkgo/reporters"
 	"github.com/onsi/gomega"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	kapiv1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -24,9 +25,11 @@ import (
 	rbacv1client "k8s.io/client-go/kubernetes/typed/rbac/v1"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
+	conformancetestdata "k8s.io/kubernetes/test/conformance/testdata"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/framework/testfiles"
-	"k8s.io/kubernetes/test/e2e/generated"
+	e2etestingmanifests "k8s.io/kubernetes/test/e2e/testing-manifests"
+	testfixtures "k8s.io/kubernetes/test/fixtures"
 
 	// this appears to inexplicably auto-register global flags.
 	_ "k8s.io/kubernetes/test/e2e/storage/drivers"
@@ -59,10 +62,9 @@ func InitTest(dryRun bool) error {
 
 	TestContext.DeleteNamespace = os.Getenv("DELETE_NAMESPACE") != "false"
 	TestContext.VerifyServiceAccount = true
-	testfiles.AddFileSource(testfiles.BindataFileSource{
-		Asset:      generated.Asset,
-		AssetNames: generated.AssetNames,
-	})
+	testfiles.AddFileSource(e2etestingmanifests.GetE2ETestingManifestsFS())
+	testfiles.AddFileSource(testfixtures.GetTestFixturesFS())
+	testfiles.AddFileSource(conformancetestdata.GetConformanceTestdataFS())
 	TestContext.KubectlPath = "kubectl"
 	TestContext.KubeConfig = KubeConfigPath()
 	os.Setenv("KUBECONFIG", TestContext.KubeConfig)
@@ -174,19 +176,24 @@ func InitDefaultEnvironmentVariables() {
 	}
 }
 
-// TODO: Use either explicit tags (k8s.io) or https://github.com/onsi/ginkgo/pull/228 to implement this.
-// isPackage determines wether the test is in a package.  Ideally would be implemented in ginkgo.
-func isPackage(pkg string) bool {
-	return strings.Contains(ginkgo.CurrentGinkgoTestDescription().FileName, pkg)
+// isGoModulePath returns true if the packagePath reported by reflection is within a
+// module and given module path. When go mod is in use, module and modulePath are not
+// contiguous as they were in older golang versions with vendoring, so naive contains
+// tests fail.
+//
+// historically: ".../vendor/k8s.io/kubernetes/test/e2e"
+// go.mod:       "k8s.io/kubernetes@0.18.4/test/e2e"
+//
+func isGoModulePath(packagePath, module, modulePath string) bool {
+	return regexp.MustCompile(fmt.Sprintf(`\b%s(@[^/]*|)/%s\b`, regexp.QuoteMeta(module), regexp.QuoteMeta(modulePath))).MatchString(packagePath)
 }
 
-// TODO: For both is*Test functions, use either explicit tags (k8s.io) or https://github.com/onsi/ginkgo/pull/228
 func isOriginTest() bool {
-	return isPackage("/origin/test/")
+	return isGoModulePath(ginkgo.CurrentGinkgoTestDescription().FileName, "github.com/openshift/origin", "test")
 }
 
 func isKubernetesE2ETest() bool {
-	return isPackage("/kubernetes/test/e2e/")
+	return isGoModulePath(ginkgo.CurrentGinkgoTestDescription().FileName, "k8s.io/kubernetes", "test/e2e")
 }
 
 func testNameContains(name string) bool {
@@ -194,7 +201,7 @@ func testNameContains(name string) bool {
 }
 
 func skipTestNamespaceCustomization() bool {
-	return (isPackage("/kubernetes/test/e2e/namespace.go") && (testNameContains("should always delete fast") || testNameContains("should delete fast enough")))
+	return testNameContains("should always delete fast") || testNameContains("should delete fast enough")
 }
 
 // createTestingNS ensures that kubernetes e2e tests have their service accounts in the privileged and anyuid SCCs
@@ -210,7 +217,7 @@ func createTestingNS(baseName string, c kclientset.Interface, labels map[string]
 
 	// Add anyuid and privileged permissions for upstream tests
 	if strings.HasPrefix(baseName, "e2e-k8s-") || (isKubernetesE2ETest() && !skipTestNamespaceCustomization()) {
-		clientConfig, err := getClientConfig(KubeConfigPath())
+		clientConfig, err := GetClientConfig(KubeConfigPath())
 		if err != nil {
 			return ns, err
 		}

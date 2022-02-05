@@ -18,11 +18,6 @@ package app
 
 // This file exists to force the desired plugin implementations to be linked.
 import (
-	// Credential providers
-	_ "k8s.io/kubernetes/pkg/credentialprovider/aws"
-	_ "k8s.io/kubernetes/pkg/credentialprovider/azure"
-	_ "k8s.io/kubernetes/pkg/credentialprovider/gcp"
-
 	"k8s.io/component-base/featuregate"
 	"k8s.io/utils/exec"
 
@@ -46,7 +41,6 @@ import (
 	"k8s.io/kubernetes/pkg/volume/projected"
 	"k8s.io/kubernetes/pkg/volume/quobyte"
 	"k8s.io/kubernetes/pkg/volume/rbd"
-	"k8s.io/kubernetes/pkg/volume/scaleio"
 	"k8s.io/kubernetes/pkg/volume/secret"
 	"k8s.io/kubernetes/pkg/volume/storageos"
 
@@ -54,8 +48,8 @@ import (
 	_ "k8s.io/kubernetes/pkg/cloudprovider/providers"
 )
 
-// probeVolumePlugins collects all volume plugins into an easy to use list.
-func probeVolumePlugins(featureGate featuregate.FeatureGate) ([]volume.VolumePlugin, error) {
+// ProbeVolumePlugins collects all volume plugins into an easy to use list.
+func ProbeVolumePlugins(featureGate featuregate.FeatureGate) ([]volume.VolumePlugin, error) {
 	allPlugins := []volume.VolumePlugin{}
 
 	// The list of plugins to probe is decided by the kubelet binary, not
@@ -85,7 +79,6 @@ func probeVolumePlugins(featureGate featuregate.FeatureGate) ([]volume.VolumePlu
 	allPlugins = append(allPlugins, configmap.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, projected.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, portworx.ProbeVolumePlugins()...)
-	allPlugins = append(allPlugins, scaleio.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, local.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, storageos.ProbeVolumePlugins()...)
 	allPlugins = append(allPlugins, csi.ProbeVolumePlugins()...)

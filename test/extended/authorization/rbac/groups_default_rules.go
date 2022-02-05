@@ -15,6 +15,7 @@ import (
 	kuser "k8s.io/apiserver/pkg/authentication/user"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
+	rbacvalidation "k8s.io/component-helpers/auth/rbac/validation"
 	kauthenticationapi "k8s.io/kubernetes/pkg/apis/authentication"
 	kauthorizationapi "k8s.io/kubernetes/pkg/apis/authorization"
 	"k8s.io/kubernetes/pkg/apis/rbac"
@@ -118,7 +119,11 @@ var (
 
 			// These custom resources are used to extend console functionality
 			// The console team is working on eliminating this exception in the near future
-			rbacv1helpers.NewRule(read...).Groups(consoleGroup).Resources("consoleclidownloads", "consolelinks", "consoleexternalloglinks", "consolenotifications", "consoleyamlsamples").RuleOrDie(),
+			rbacv1helpers.NewRule(read...).Groups(consoleGroup).Resources("consoleclidownloads", "consolelinks", "consoleexternalloglinks", "consolenotifications", "consoleyamlsamples", "consolequickstarts", "consoleplugins").RuleOrDie(),
+
+			// HelmChartRepository instances keep Helm chart repository configuration
+			// By default users are able to browse charts from all configured repositories through console UI
+			rbacv1helpers.NewRule("get", "list").Groups("helm.openshift.io").Resources("helmchartrepositories").RuleOrDie(),
 
 			// TODO: remove when openshift-apiserver has removed these
 			rbacv1helpers.NewRule("get").URLs(
@@ -152,6 +157,11 @@ var (
 			},
 			"openshift-config-managed": {
 				rbacv1helpers.NewRule("get").Groups(legacyGroup).Resources("configmaps").Names("console-public").RuleOrDie(),
+				rbacv1helpers.NewRule(read...).Groups("").Resources("configmaps").Names("oauth-serving-cert").RuleOrDie(),
+			},
+			"kube-system": {
+				// this allows every authenticated user to use in-cluster client certificate termination
+				rbacv1helpers.NewRule(read...).Groups(legacyGroup).Resources("configmaps").Names("extension-apiserver-authentication").RuleOrDie(),
 			},
 		},
 		kuser.AllUnauthenticated:     {}, // no rules expect the cluster wide ones
@@ -200,6 +210,7 @@ var _ = g.Describe("[sig-auth][Feature:OpenShiftAuthorization] The default clust
 		g.By("should only allow the system:authenticated:oauth group to access certain policy rules", func() {
 			testAllGroupRules(ruleResolver, "system:authenticated:oauth", []rbacv1.PolicyRule{
 				rbacv1helpers.NewRule("create").Groups(projectGroup, legacyProjectGroup).Resources("projectrequests").RuleOrDie(),
+				rbacv1helpers.NewRule("get", "list", "watch", "delete").Groups(oauthGroup).Resources("useroauthaccesstokens").RuleOrDie(),
 			}, namespaces.Items)
 		})
 
@@ -222,12 +233,12 @@ func testGroupRules(ruleResolver validation.AuthorizationRuleResolver, group, na
 	actualRules, err := ruleResolver.RulesFor(&kuser.DefaultInfo{Groups: []string{group}}, namespace)
 	o.Expect(err).NotTo(o.HaveOccurred()) // our default RBAC policy should never have rule resolution errors
 
-	if cover, missing := validation.Covers(expectedRules, actualRules); !cover {
+	if cover, missing := rbacvalidation.Covers(expectedRules, actualRules); !cover {
 		e2e.Failf("%s has extra permissions in namespace %q:\n%s", group, namespace, rulesToString(missing))
 	}
 
 	// force test data to be cleaned up every so often but allow extra rules to not deadlock new changes
-	if cover, missing := validation.Covers(actualRules, expectedRules); !cover {
+	if cover, missing := rbacvalidation.Covers(actualRules, expectedRules); !cover {
 		log := e2e.Logf
 		if len(missing) > 15 {
 			log = e2e.Failf

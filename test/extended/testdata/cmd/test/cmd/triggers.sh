@@ -16,7 +16,7 @@ project="$(oc project -q)"
 os::test::junit::declare_suite_start "cmd/triggers"
 # This test validates triggers
 
-os::cmd::expect_success 'oc new-app centos/ruby-25-centos7~https://github.com/openshift/ruby-hello-world.git'
+os::cmd::expect_success 'oc new-app registry.access.redhat.com/ubi8/ruby-27~https://github.com/openshift/ruby-hello-world.git'
 os::cmd::expect_success 'oc get bc/ruby-hello-world'
 
 os::cmd::expect_success "oc new-build --name=scratch --docker-image=scratch --dockerfile='FROM scratch'"
@@ -29,7 +29,7 @@ os::cmd::expect_failure_and_text 'oc set triggers bc/ruby-hello-world --remove -
 os::cmd::expect_failure_and_text 'oc set triggers bc/ruby-hello-world --auto --manual' 'at most one of --auto or --manual'
 # print
 os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'config.*true'
-os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-25-centos7:latest.*true'
+os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-27:latest.*true'
 os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'webhook'
 os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'github'
 # note, oc new-app currently does not set up gitlab or bitbucket webhooks by default
@@ -46,7 +46,7 @@ os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --remove-a
 
 os::cmd::expect_success_and_not_text 'oc set triggers bc/ruby-hello-world' 'webhook|github'
 os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'config.*false'
-os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-25-centos7:latest.*false'
+os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-27:latest.*false'
 # set github hook
 os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-github' 'updated'
 os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'github'
@@ -73,18 +73,18 @@ os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'bitbucke
 os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --remove --from-bitbucket' 'updated'
 os::cmd::expect_success_and_not_text 'oc set triggers bc/ruby-hello-world' 'bitbucket'
 # set from-image
-os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-25-centos7:other' 'updated'
-os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-25-centos7:other.*true'
+os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-27:other' 'updated'
+os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-27:other.*true'
 # manual and remove both clear build configs
-os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-25-centos7:other --manual' 'updated'
-os::cmd::expect_success_and_not_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-25-centos7:other.*false'
-os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-25-centos7:other' 'updated'
-os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-25-centos7:other --remove' 'updated'
-os::cmd::expect_success_and_not_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-25-centos7:other'
+os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-27:other --manual' 'updated'
+os::cmd::expect_success_and_not_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-27:other.*false'
+os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-27:other' 'updated'
+os::cmd::expect_success_and_text 'oc set triggers bc/ruby-hello-world --from-image=ruby-27:other --remove' 'updated'
+os::cmd::expect_success_and_not_text 'oc set triggers bc/ruby-hello-world' 'image.*ruby-27:other'
 # test --all
-os::cmd::expect_success_and_text 'oc set triggers bc --all' 'buildconfigs/ruby-hello-world.*image.*ruby-25-centos7:latest.*false'
+os::cmd::expect_success_and_text 'oc set triggers bc --all' 'buildconfigs/ruby-hello-world.*image.*ruby-27:latest.*false'
 os::cmd::expect_success_and_text 'oc set triggers bc --all --auto' 'updated'
-os::cmd::expect_success_and_text 'oc set triggers bc --all' 'buildconfigs/ruby-hello-world.*image.*ruby-25-centos7:latest.*true'
+os::cmd::expect_success_and_text 'oc set triggers bc --all' 'buildconfigs/ruby-hello-world.*image.*ruby-27:latest.*true'
 # set a trigger on a build that doesn't have an imagestream strategy.from-image
 os::cmd::expect_success_and_text 'oc set triggers bc/scratch --from-image=test:latest' 'updated'
 
@@ -93,7 +93,7 @@ os::test::junit::declare_suite_end
 os::test::junit::declare_suite_start "cmd/triggers/deploymentconfigs"
 ## Deployment configs
 
-os::cmd::expect_success 'oc create deploymentconfig testdc --image=busybox'
+os::cmd::expect_success 'oc create deploymentconfig testdc --image=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest'
 
 # error conditions
 os::cmd::expect_failure_and_text 'oc set triggers dc/testdc --from-github' 'deployment configs do not support GitHub web hooks'
@@ -121,7 +121,7 @@ os::test::junit::declare_suite_end
 os::test::junit::declare_suite_start "cmd/triggers/annotations"
 ## Deployment
 
-os::cmd::expect_success 'oc create deployment test --image=busybox'
+os::cmd::expect_success 'oc create deployment test --image=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest'
 
 # error conditions
 os::cmd::expect_failure_and_text 'oc set triggers deploy/test --from-github' 'does not support GitHub web hooks'
@@ -129,7 +129,7 @@ os::cmd::expect_failure_and_text 'oc set triggers deploy/test --from-webhook' 'd
 os::cmd::expect_failure_and_text 'oc set triggers deploy/test --from-gitlab' 'does not support GitLab web hooks'
 os::cmd::expect_failure_and_text 'oc set triggers deploy/test --from-bitbucket' 'does not support Bitbucket web hooks'
 os::cmd::expect_failure_and_text 'oc set triggers deploy/test --from-image=test:latest' 'you must specify --containers when setting --from-image'
-os::cmd::expect_failure_and_text 'oc set triggers deploy/test --from-image=test:latest --containers=other' 'not all container names exist: other \(accepts: busybox\)'
+os::cmd::expect_failure_and_text 'oc set triggers deploy/test --from-image=test:latest --containers=other' 'not all container names exist: other \(accepts: tools\)'
 # print
 os::cmd::expect_success_and_text 'oc set triggers deploy/test' 'config.*true'
 os::cmd::expect_success_and_not_text 'oc set triggers deploy/test' 'webhook|github|gitlab|bitbucket'
@@ -142,8 +142,8 @@ os::cmd::expect_success_and_text 'oc set triggers deploy/test' 'config.*false'
 # auto
 os::cmd::expect_success_and_text 'oc set triggers deploy/test --auto' 'updated'
 os::cmd::expect_success_and_text 'oc set triggers deploy/test' 'config.*true'
-os::cmd::expect_success_and_text 'oc set triggers deploy/test --from-image=ruby-hello-world:latest -c busybox' 'updated'
-os::cmd::expect_success_and_text 'oc set triggers deploy/test' 'image.*ruby-hello-world:latest \(busybox\).*true'
+os::cmd::expect_success_and_text 'oc set triggers deploy/test --from-image=ruby-hello-world:latest -c tools' 'updated'
+os::cmd::expect_success_and_text 'oc set triggers deploy/test' 'image.*ruby-hello-world:latest \(tools\).*true'
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_end

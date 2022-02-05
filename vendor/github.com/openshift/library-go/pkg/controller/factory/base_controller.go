@@ -2,20 +2,30 @@ package factory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/robfig/cron"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog"
+	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
 
 	operatorv1 "github.com/openshift/api/operator/v1"
-
+	"github.com/openshift/library-go/pkg/operator/management"
 	"github.com/openshift/library-go/pkg/operator/v1helpers"
 	operatorv1helpers "github.com/openshift/library-go/pkg/operator/v1helpers"
 )
+
+// SyntheticRequeueError can be returned from sync() in case of forcing a sync() retry artificially.
+// This can be also done by re-adding the key to queue, but this is cheaper and more convenient.
+var SyntheticRequeueError = errors.New("synthetic requeue request")
+
+var defaultCacheSyncTimeout = 10 * time.Minute
 
 // baseController represents generic Kubernetes controller boiler-plate
 type baseController struct {
@@ -25,7 +35,9 @@ type baseController struct {
 	syncContext        SyncContext
 	syncDegradedClient operatorv1helpers.OperatorClient
 	resyncEvery        time.Duration
+	resyncSchedules    []cron.Schedule
 	postStartHooks     []PostStartHook
+	cacheSyncTimeout   time.Duration
 }
 
 var _ Controller = &baseController{}
@@ -34,11 +46,55 @@ func (c baseController) Name() string {
 	return c.name
 }
 
+type scheduledJob struct {
+	queue workqueue.RateLimitingInterface
+	name  string
+}
+
+func newScheduledJob(name string, queue workqueue.RateLimitingInterface) cron.Job {
+	return &scheduledJob{
+		queue: queue,
+		name:  name,
+	}
+}
+
+func (s *scheduledJob) Run() {
+	klog.V(4).Infof("Triggering scheduled %q controller run", s.name)
+	s.queue.Add(DefaultQueueKey)
+}
+
+func waitForNamedCacheSync(controllerName string, stopCh <-chan struct{}, cacheSyncs ...cache.InformerSynced) error {
+	klog.Infof("Waiting for caches to sync for %s", controllerName)
+
+	if !cache.WaitForCacheSync(stopCh, cacheSyncs...) {
+		return fmt.Errorf("unable to sync caches for %s", controllerName)
+	}
+
+	klog.Infof("Caches are synced for %s ", controllerName)
+
+	return nil
+}
+
 func (c *baseController) Run(ctx context.Context, workers int) {
 	// HandleCrash recovers panics
-	defer utilruntime.HandleCrash()
-	if !cache.WaitForNamedCacheSync(c.name, ctx.Done(), c.cachesToSync...) {
-		panic("timeout waiting for informer cache") // this will be recovered using HandleCrash()
+	defer utilruntime.HandleCrash(c.degradedPanicHandler)
+
+	// give caches 10 minutes to sync
+	cacheSyncCtx, cacheSyncCancel := context.WithTimeout(ctx, c.cacheSyncTimeout)
+	defer cacheSyncCancel()
+	err := waitForNamedCacheSync(c.name, cacheSyncCtx.Done(), c.cachesToSync...)
+	if err != nil {
+		select {
+		case <-ctx.Done():
+			// Exit gracefully because the controller was requested to stop.
+			return
+		default:
+			// If caches did not sync after 10 minutes, it has taken oddly long and
+			// we should provide feedback. Since the control loops will never start,
+			// it is safer to exit with a good message than to continue with a dead loop.
+			// TODO: Consider making this behavior configurable.
+			klog.Exit(err)
+		}
 	}
 
 	var workerWg sync.WaitGroup
@@ -60,6 +116,16 @@ func (c *baseController) Run(ctx context.Context, workers int) {
 			}()
 			c.runWorker(queueContext)
 		}()
+	}
+
+	// if scheduled run is requested, run the cron scheduler
+	if c.resyncSchedules != nil {
+		scheduler := cron.New()
+		for _, s := range c.resyncSchedules {
+			scheduler.Schedule(s, newScheduledJob(c.name, c.syncContext.Queue()))
+		}
+		scheduler.Start()
+		defer scheduler.Stop()
 	}
 
 	// runPeriodicalResync is independent from queue
@@ -118,39 +184,58 @@ func (c *baseController) runPeriodicalResync(ctx context.Context, interval time.
 // The worker is asked to terminate when the passed context is cancelled and is given terminationGraceDuration time
 // to complete its shutdown.
 func (c *baseController) runWorker(queueCtx context.Context) {
-	var workerWaitGroup sync.WaitGroup
-	workerWaitGroup.Add(1)
-	go func() {
-		defer workerWaitGroup.Done()
-		for {
-			select {
-			case <-queueCtx.Done():
-				return
-			default:
-				c.processNextWorkItem(queueCtx)
+	wait.UntilWithContext(
+		queueCtx,
+		func(queueCtx context.Context) {
+			defer utilruntime.HandleCrash(c.degradedPanicHandler)
+			for {
+				select {
+				case <-queueCtx.Done():
+					return
+				default:
+					c.processNextWorkItem(queueCtx)
+				}
 			}
-		}
-	}()
-	workerWaitGroup.Wait()
+		},
+		1*time.Second)
 }
 
 // reconcile wraps the sync() call and if operator client is set, it handle the degraded condition if sync() returns an error.
 func (c *baseController) reconcile(ctx context.Context, syncCtx SyncContext) error {
 	err := c.sync(ctx, syncCtx)
-	if c.syncDegradedClient == nil {
+	degradedErr := c.reportDegraded(ctx, err)
+	if apierrors.IsNotFound(degradedErr) && management.IsOperatorRemovable() {
+		// The operator tolerates missing CR, therefore don't report it up.
 		return err
 	}
-	if err != nil {
+	return degradedErr
+}
+
+// degradedPanicHandler will go degraded on failures, then we should catch potential panics and covert them into bad status.
+func (c *baseController) degradedPanicHandler(panicVal interface{}) {
+	if c.syncDegradedClient == nil {
+		// if we don't have a client for reporting degraded condition, then let the existing panic handler do the work
+		return
+	}
+	_ = c.reportDegraded(context.TODO(), fmt.Errorf("panic caught:\n%v", panicVal))
+}
+
+// reportDegraded updates status with an indication of degraded-ness
+func (c *baseController) reportDegraded(ctx context.Context, reportedError error) error {
+	if c.syncDegradedClient == nil {
+		return reportedError
+	}
+	if reportedError != nil {
 		_, _, updateErr := v1helpers.UpdateStatus(c.syncDegradedClient, v1helpers.UpdateConditionFn(operatorv1.OperatorCondition{
 			Type:    c.name + "Degraded",
 			Status:  operatorv1.ConditionTrue,
 			Reason:  "SyncError",
-			Message: err.Error(),
+			Message: reportedError.Error(),
 		}))
 		if updateErr != nil {
-			klog.Warningf("Updating status of %q failed: %w", c.Name(), updateErr)
+			klog.Warningf("Updating status of %q failed: %v", c.Name(), updateErr)
 		}
-		return err
+		return reportedError
 	}
 	_, _, updateErr := v1helpers.UpdateStatus(c.syncDegradedClient,
 		v1helpers.UpdateConditionFn(operatorv1.OperatorCondition{
@@ -177,7 +262,16 @@ func (c *baseController) processNextWorkItem(queueCtx context.Context) {
 	}
 
 	if err := c.reconcile(queueCtx, syncCtx); err != nil {
-		utilruntime.HandleError(fmt.Errorf("%q controller failed to sync %q, err: %w", c.name, key, err))
+		if err == SyntheticRequeueError {
+			// logging this helps detecting wedged controllers with missing pre-requirements
+			klog.V(5).Infof("%q controller requested synthetic requeue with key %q", c.name, key)
+		} else {
+			if klog.V(4).Enabled() || key != "key" {
+				utilruntime.HandleError(fmt.Errorf("%q controller failed to sync %q, err: %w", c.name, key, err))
+			} else {
+				utilruntime.HandleError(fmt.Errorf("%s reconciliation failed: %w", c.name, err))
+			}
+		}
 		c.syncContext.Queue().AddRateLimited(key)
 		return
 	}

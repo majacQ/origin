@@ -6,24 +6,19 @@ import (
 	"strconv"
 	"time"
 
-	"k8s.io/client-go/kubernetes"
-
-	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/discovery"
-	"k8s.io/client-go/restmapper"
-	"k8s.io/client-go/scale"
-
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 	"github.com/stretchr/objx"
-
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/restmapper"
+	"k8s.io/client-go/scale"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
-
-	"github.com/openshift/origin/test/extended/util/ibmcloud"
 )
 
 const (
@@ -144,10 +139,6 @@ func scaleMachineSet(name string, replicas int) error {
 
 var _ = g.Describe("[sig-cluster-lifecycle][Feature:Machines][Serial] Managed cluster should", func() {
 	g.It("grow and decrease when scaling different machineSets simultaneously", func() {
-		if e2e.TestContext.Provider == ibmcloud.ProviderName {
-			e2eskipper.Skipf("IBM Cloud clusters do not contain machineset resources")
-		}
-
 		// expect new nodes to come up for machineSet
 		verifyNodeScalingFunc := func(c *kubernetes.Clientset, dc dynamic.Interface, expectedScaleOut int, machineSet objx.Map) bool {
 			nodes, err := getNodesFromMachineSet(c, dc, machineName(machineSet))
@@ -173,6 +164,10 @@ var _ = g.Describe("[sig-cluster-lifecycle][Feature:Machines][Serial] Managed cl
 		o.Expect(err).NotTo(o.HaveOccurred())
 		dc, err := dynamic.NewForConfig(cfg)
 		o.Expect(err).NotTo(o.HaveOccurred())
+
+		g.By("checking for the openshift machine api operator")
+		// TODO: skip if platform != aws
+		skipUnlessMachineAPIOperator(dc, c.CoreV1().Namespaces())
 
 		g.By("fetching worker machineSets")
 		machineSets, err := listWorkerMachineSets(dc)
@@ -223,7 +218,37 @@ var _ = g.Describe("[sig-cluster-lifecycle][Feature:Machines][Serial] Managed cl
 			})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			g.By(fmt.Sprintf("got %v nodes, expecting %v", len(nodeList.Items), initialNumberOfWorkers))
-			return len(nodeList.Items) == initialNumberOfWorkers
+			if len(nodeList.Items) != initialNumberOfWorkers {
+				return false
+			}
+
+			g.By(fmt.Sprintf("ensure worker is healthy"))
+			for _, node := range nodeList.Items {
+				for _, condition := range node.Status.Conditions {
+					switch condition.Type {
+					case corev1.NodeReady:
+						if condition.Status != corev1.ConditionTrue {
+							e2e.Logf("node/%s had unexpected condition %q == %v: %#v", node.Name, condition.Reason, condition.Status)
+							return false
+						}
+					case corev1.NodeMemoryPressure,
+						corev1.NodeDiskPressure,
+						corev1.NodePIDPressure,
+						corev1.NodeNetworkUnavailable:
+						if condition.Status != corev1.ConditionFalse {
+							e2e.Logf("node/%s had unexpected condition %q == %v: %#v", node.Name, condition.Reason, condition.Status)
+							return false
+						}
+
+					default:
+						e2e.Logf("node/%s had unhandled condition %q == %v: %#v", node.Name, condition.Reason, condition.Status)
+
+					}
+				}
+				e2e.Logf("node/%s conditions seem ok")
+			}
+
+			return true
 			// Azure actuator takes something over 3 minutes to delete a machine.
 			// The worst observable case to delete a machine was 5m15s however.
 			// Also, there are two instances to be deleted.

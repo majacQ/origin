@@ -30,7 +30,7 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
-	policyv1beta1 "k8s.io/api/policy/v1beta1"
+	policyv1 "k8s.io/api/policy/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -42,9 +42,9 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/klog"
-	api "k8s.io/kubernetes/pkg/apis/core"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2emanifest "k8s.io/kubernetes/test/e2e/framework/manifest"
 	e2enetwork "k8s.io/kubernetes/test/e2e/framework/network"
 	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
@@ -94,7 +94,6 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 	f := framework.NewDefaultFramework("autoscaling")
 	var c clientset.Interface
 	var nodeCount int
-	var coreCount int64
 	var memAllocatableMb int
 	var originalSizes map[string]int
 
@@ -117,11 +116,6 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 		nodes, err := e2enode.GetReadySchedulableNodes(f.ClientSet)
 		framework.ExpectNoError(err)
 		nodeCount = len(nodes.Items)
-		coreCount = 0
-		for _, node := range nodes.Items {
-			quantity := node.Status.Allocatable[v1.ResourceCPU]
-			coreCount += quantity.Value()
-		}
 		ginkgo.By(fmt.Sprintf("Initial number of schedulable nodes: %v", nodeCount))
 		framework.ExpectNotEqual(nodeCount, 0)
 		mem := nodes.Items[0].Status.Allocatable[v1.ResourceMemory]
@@ -183,7 +177,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 			framework.ExpectNoError(err)
 
 			for _, e := range events.Items {
-				if e.InvolvedObject.Kind == "Pod" && e.Reason == "NotTriggerScaleUp" && strings.Contains(e.Message, "it wouldn't fit if a new node is added") {
+				if e.InvolvedObject.Kind == "Pod" && e.Reason == "NotTriggerScaleUp" {
 					ginkgo.By("NotTriggerScaleUp event found")
 					eventFound = true
 					break EventsLoop
@@ -222,7 +216,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 		addGpuNodePool(gpuPoolName, gpuType, 1, 0)
 		defer deleteNodePool(gpuPoolName)
 
-		installNvidiaDriversDaemonSet(f.Namespace.Name)
+		installNvidiaDriversDaemonSet(f)
 
 		ginkgo.By("Enable autoscaler")
 		framework.ExpectNoError(enableAutoscaler(gpuPoolName, 0, 1))
@@ -249,7 +243,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 		addGpuNodePool(gpuPoolName, gpuType, 1, 1)
 		defer deleteNodePool(gpuPoolName)
 
-		installNvidiaDriversDaemonSet(f.Namespace.Name)
+		installNvidiaDriversDaemonSet(f)
 
 		ginkgo.By("Schedule a single pod which requires GPU")
 		framework.ExpectNoError(ScheduleAnySingleGpuPod(f, "gpu-pod-rc"))
@@ -279,7 +273,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 		addGpuNodePool(gpuPoolName, gpuType, 1, 0)
 		defer deleteNodePool(gpuPoolName)
 
-		installNvidiaDriversDaemonSet(f.Namespace.Name)
+		installNvidiaDriversDaemonSet(f)
 
 		ginkgo.By("Enable autoscaler")
 		framework.ExpectNoError(enableAutoscaler(gpuPoolName, 0, 1))
@@ -308,7 +302,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 		addGpuNodePool(gpuPoolName, gpuType, 1, 1)
 		defer deleteNodePool(gpuPoolName)
 
-		installNvidiaDriversDaemonSet(f.Namespace.Name)
+		installNvidiaDriversDaemonSet(f)
 
 		ginkgo.By("Schedule a single pod which requires GPU")
 		framework.ExpectNoError(ScheduleAnySingleGpuPod(f, "gpu-pod-rc"))
@@ -499,7 +493,7 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 
 		pv, pvc, err := e2epv.CreatePVPVC(c, pvConfig, pvcConfig, f.Namespace.Name, false)
 		framework.ExpectNoError(err)
-		framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Namespace.Name, pv, pvc))
+		framework.ExpectNoError(e2epv.WaitOnPVandPVC(c, f.Timeouts, f.Namespace.Name, pv, pvc))
 
 		defer func() {
 			errs := e2epv.PVPVCCleanup(c, f.Namespace.Name, pv, pvc)
@@ -999,10 +993,18 @@ var _ = SIGDescribe("Cluster size autoscaling [Slow]", func() {
 	})
 })
 
-func installNvidiaDriversDaemonSet(namespace string) {
+func installNvidiaDriversDaemonSet(f *framework.Framework) {
 	ginkgo.By("Add daemonset which installs nvidia drivers")
-	// the link differs from one in GKE documentation; discussed with @mindprince this one should be used
-	framework.RunKubectlOrDie(namespace, "apply", "-f", "https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/daemonset.yaml")
+
+	dsYamlURL := "https://raw.githubusercontent.com/GoogleCloudPlatform/container-engine-accelerators/master/daemonset.yaml"
+	framework.Logf("Using %v", dsYamlURL)
+	// Creates the DaemonSet that installs Nvidia Drivers.
+	ds, err := e2emanifest.DaemonSetFromURL(dsYamlURL)
+	framework.ExpectNoError(err)
+	ds.Namespace = f.Namespace.Name
+
+	_, err = f.ClientSet.AppsV1().DaemonSets(f.Namespace.Name).Create(context.TODO(), ds, metav1.CreateOptions{})
+	framework.ExpectNoError(err, "failed to create nvidia-driver-installer daemonset")
 }
 
 func execCmd(args ...string) *exec.Cmd {
@@ -1026,20 +1028,20 @@ func runDrainTest(f *framework.Framework, migSizes map[string]int, namespace str
 
 	ginkgo.By("Create a PodDisruptionBudget")
 	minAvailable := intstr.FromInt(numPods - pdbSize)
-	pdb := &policyv1beta1.PodDisruptionBudget{
+	pdb := &policyv1.PodDisruptionBudget{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test_pdb",
 			Namespace: namespace,
 		},
-		Spec: policyv1beta1.PodDisruptionBudgetSpec{
+		Spec: policyv1.PodDisruptionBudgetSpec{
 			Selector:     &metav1.LabelSelector{MatchLabels: labelMap},
 			MinAvailable: &minAvailable,
 		},
 	}
-	_, err = f.ClientSet.PolicyV1beta1().PodDisruptionBudgets(namespace).Create(context.TODO(), pdb, metav1.CreateOptions{})
+	_, err = f.ClientSet.PolicyV1().PodDisruptionBudgets(namespace).Create(context.TODO(), pdb, metav1.CreateOptions{})
 
 	defer func() {
-		f.ClientSet.PolicyV1beta1().PodDisruptionBudgets(namespace).Delete(context.TODO(), pdb.Name, metav1.DeleteOptions{})
+		f.ClientSet.PolicyV1().PodDisruptionBudgets(namespace).Delete(context.TODO(), pdb.Name, metav1.DeleteOptions{})
 	}()
 
 	framework.ExpectNoError(err)
@@ -1447,7 +1449,7 @@ func drainNode(f *framework.Framework, node *v1.Node) {
 	makeNodeUnschedulable(f.ClientSet, node)
 
 	ginkgo.By("Manually drain the single node")
-	podOpts := metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector(api.PodHostField, node.Name).String()}
+	podOpts := metav1.ListOptions{FieldSelector: fields.OneTermEqualSelector("spec.nodeName", node.Name).String()}
 	pods, err := f.ClientSet.CoreV1().Pods(metav1.NamespaceAll).List(context.TODO(), podOpts)
 	framework.ExpectNoError(err)
 	for _, pod := range pods.Items {
@@ -1879,7 +1881,7 @@ func addKubeSystemPdbs(f *framework.Framework) (func(), error) {
 		var finalErr error
 		for _, newPdbName := range newPdbs {
 			ginkgo.By(fmt.Sprintf("Delete PodDisruptionBudget %v", newPdbName))
-			err := f.ClientSet.PolicyV1beta1().PodDisruptionBudgets("kube-system").Delete(context.TODO(), newPdbName, metav1.DeleteOptions{})
+			err := f.ClientSet.PolicyV1().PodDisruptionBudgets("kube-system").Delete(context.TODO(), newPdbName, metav1.DeleteOptions{})
 			if err != nil {
 				// log error, but attempt to remove other pdbs
 				klog.Errorf("Failed to delete PodDisruptionBudget %v, err: %v", newPdbName, err)
@@ -1907,17 +1909,17 @@ func addKubeSystemPdbs(f *framework.Framework) (func(), error) {
 		labelMap := map[string]string{"k8s-app": pdbData.label}
 		pdbName := fmt.Sprintf("test-pdb-for-%v", pdbData.label)
 		minAvailable := intstr.FromInt(pdbData.minAvailable)
-		pdb := &policyv1beta1.PodDisruptionBudget{
+		pdb := &policyv1.PodDisruptionBudget{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      pdbName,
 				Namespace: "kube-system",
 			},
-			Spec: policyv1beta1.PodDisruptionBudgetSpec{
+			Spec: policyv1.PodDisruptionBudgetSpec{
 				Selector:     &metav1.LabelSelector{MatchLabels: labelMap},
 				MinAvailable: &minAvailable,
 			},
 		}
-		_, err := f.ClientSet.PolicyV1beta1().PodDisruptionBudgets("kube-system").Create(context.TODO(), pdb, metav1.CreateOptions{})
+		_, err := f.ClientSet.PolicyV1().PodDisruptionBudgets("kube-system").Create(context.TODO(), pdb, metav1.CreateOptions{})
 		newPdbs = append(newPdbs, pdbName)
 
 		if err != nil {

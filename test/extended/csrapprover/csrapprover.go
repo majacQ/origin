@@ -17,18 +17,19 @@ import (
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
-	certv1beta1 "k8s.io/api/certificates/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 
+	certv1 "k8s.io/api/certificates/v1"
 	kubeclient "k8s.io/client-go/kubernetes"
-	certclientv1beta1 "k8s.io/client-go/kubernetes/typed/certificates/v1beta1"
+	certclientv1 "k8s.io/client-go/kubernetes/typed/certificates/v1"
 	restclient "k8s.io/client-go/rest"
 
 	exutil "github.com/openshift/origin/test/extended/util"
 	"github.com/openshift/origin/test/extended/util/ibmcloud"
+	"github.com/openshift/origin/test/extended/util/image"
 )
 
 var _ = g.Describe("[sig-cluster-lifecycle]", func() {
@@ -45,7 +46,7 @@ var _ = g.Describe("[sig-cluster-lifecycle]", func() {
 		// the /config/master API port+endpoint is only visible from inside the cluster
 		// (-> we need to create a pod to try to reach it) and contains the token
 		// of the node-bootstrapper SA, so no random pods should be able to see it
-		pod, err := exutil.NewPodExecutor(oc, "get-bootstrap-creds", "quay.io/fedora/fedora:32-x86_64")
+		pod, err := exutil.NewPodExecutor(oc, "get-bootstrap-creds", image.ShellImage())
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		// get the API server URL, mutate to internal API (use infra.Status.APIServerURLInternal) once API is bumped
@@ -100,21 +101,23 @@ var _ = g.Describe("[sig-cluster-lifecycle]", func() {
 		bootstrapperClient := kubeclient.NewForConfigOrDie(saClientConfig)
 
 		csrName := "node-client-csr"
-		bootstrapperClient.CertificatesV1beta1().CertificateSigningRequests().Create(context.Background(), &certv1beta1.CertificateSigningRequest{
+		_, err = bootstrapperClient.CertificatesV1().CertificateSigningRequests().Create(context.Background(), &certv1.CertificateSigningRequest{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: csrName,
 			},
-			Spec: certv1beta1.CertificateSigningRequestSpec{
-				Request: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrbytes}),
-				Usages: []certv1beta1.KeyUsage{
-					certv1beta1.UsageDigitalSignature,
-					certv1beta1.UsageKeyEncipherment,
-					certv1beta1.UsageClientAuth,
+			Spec: certv1.CertificateSigningRequestSpec{
+				SignerName: "kubernetes.io/kubelet-serving",
+				Request:    pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrbytes}),
+				Usages: []certv1.KeyUsage{
+					certv1.UsageDigitalSignature,
+					certv1.UsageKeyEncipherment,
+					certv1.UsageClientAuth,
 				},
 			},
 		}, metav1.CreateOptions{})
+		o.Expect(err).NotTo(o.HaveOccurred())
 
-		csrClient := oc.AdminKubeClient().CertificatesV1beta1().CertificateSigningRequests()
+		csrClient := oc.AdminKubeClient().CertificatesV1().CertificateSigningRequests()
 		defer cleanupCSR(csrClient, csrName)
 
 		err = waitCSRStatus(csrClient, csrName)
@@ -127,7 +130,7 @@ var _ = g.Describe("[sig-cluster-lifecycle]", func() {
 })
 
 // waits for the CSR object to change status, checks that it did not get approved
-func waitCSRStatus(csrAdminClient certclientv1beta1.CertificateSigningRequestInterface, csrName string) error {
+func waitCSRStatus(csrAdminClient certclientv1.CertificateSigningRequestInterface, csrName string) error {
 	return wait.Poll(1*time.Second, 30*time.Second, func() (bool, error) {
 		csr, err := csrAdminClient.Get(context.Background(), csrName, metav1.GetOptions{})
 		if err != nil {
@@ -135,7 +138,7 @@ func waitCSRStatus(csrAdminClient certclientv1beta1.CertificateSigningRequestInt
 		}
 		if len(csr.Status.Conditions) > 0 {
 			for _, c := range csr.Status.Conditions {
-				if c.Type == certv1beta1.CertificateApproved {
+				if c.Type == certv1.CertificateApproved {
 					return true, fmt.Errorf("CSR for unknown node should not be approved")
 				}
 			}
@@ -144,6 +147,6 @@ func waitCSRStatus(csrAdminClient certclientv1beta1.CertificateSigningRequestInt
 	})
 }
 
-func cleanupCSR(csrAdminClient certclientv1beta1.CertificateSigningRequestInterface, name string) {
+func cleanupCSR(csrAdminClient certclientv1.CertificateSigningRequestInterface, name string) {
 	csrAdminClient.Delete(context.Background(), name, metav1.DeleteOptions{})
 }

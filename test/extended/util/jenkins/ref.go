@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io/ioutil"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -61,9 +62,9 @@ type Definition struct {
 // NewRef creates a jenkins reference from an OC client
 func NewRef(oc *exutil.CLI) *JenkinsRef {
 	g.By("get ip and port for jenkins service")
-	serviceIP, err := oc.AsAdmin().Run("get").Args("svc", "jenkins").Template("{{.spec.clusterIP}}").Output()
+	serviceIP, err := oc.AsAdmin().Run("get").Args("svc", "jenkins", "--output=template", "--template={{.spec.clusterIP}}").Output()
 	o.Expect(err).NotTo(o.HaveOccurred())
-	port, err := oc.AsAdmin().Run("get").Args("svc", "jenkins").Template("{{ $x := index .spec.ports 0}}{{$x.port}}").Output()
+	port, err := oc.AsAdmin().Run("get").Args("svc", "jenkins", "--output=template", "--template={{ $x := index .spec.ports 0}}{{$x.port}}").Output()
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	g.By("get token via whoami")
@@ -89,7 +90,7 @@ func (j *JenkinsRef) Namespace() string {
 // BuildURI builds a URI for the Jenkins server.
 func (j *JenkinsRef) BuildURI(resourcePathFormat string, a ...interface{}) string {
 	resourcePath := fmt.Sprintf(resourcePathFormat, a...)
-	return fmt.Sprintf("http://%s:%v/%s", j.host, j.port, resourcePath)
+	return fmt.Sprintf("http://%s/%s", net.JoinHostPort(j.host, j.port), resourcePath)
 }
 
 // GetResource submits a GET request to this Jenkins server.

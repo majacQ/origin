@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 
 	configv1 "github.com/openshift/api/config/v1"
 	configv1client "github.com/openshift/client-go/config/clientset/versioned"
+	"github.com/openshift/origin/test/extended/util/disruption"
+	"github.com/openshift/origin/test/extended/util/image"
 )
 
 type versionMonitor struct {
@@ -59,8 +62,16 @@ func (m *versionMonitor) Check(initialGeneration int64, desired configv1.Update)
 }
 
 func (m *versionMonitor) Reached(cv *configv1.ClusterVersion, desired configv1.Update) (bool, error) {
+	// Create a configv1.Update type from the image and version fields
+	// of cv.status.desired to simplify comparison via
+	// equivalentUpdates.
+	statusDesired := configv1.Update{
+		Image:   cv.Status.Desired.Image,
+		Version: cv.Status.Desired.Version,
+	}
+
 	// if the operator hasn't observed our request
-	if !equivalentUpdates(cv.Status.Desired, desired) {
+	if !equivalentUpdates(statusDesired, desired) {
 		return false, nil
 	}
 	// is the latest history item equal to our desired and completed
@@ -122,7 +133,7 @@ func (m *versionMonitor) ShouldUpgradeAbort(abortAt int) bool {
 	return true
 }
 
-func (m *versionMonitor) Output() {
+func (m *versionMonitor) Describe(f *framework.Framework) {
 	if m.lastCV != nil {
 		data, _ := json.MarshalIndent(m.lastCV, "", "  ")
 		framework.Logf("Cluster version:\n%s", data)
@@ -132,13 +143,30 @@ func (m *versionMonitor) Output() {
 		tw := tabwriter.NewWriter(buf, 0, 2, 1, ' ', 0)
 		fmt.Fprintf(tw, "NAME\tA F P\tVERSION\tMESSAGE\n")
 		for _, item := range coList.Items {
+			available := findCondition(item.Status.Conditions, configv1.OperatorAvailable)
+			degraded := findCondition(item.Status.Conditions, configv1.OperatorDegraded)
+			progressing := findCondition(item.Status.Conditions, configv1.OperatorProgressing)
+
+			switch {
+			case !conditionHasStatus(available, configv1.ConditionTrue):
+				disruption.RecordJUnitResult(f, fmt.Sprintf("Operator upgrade %s", item.Name), 0, fmt.Sprintf("Failed to upgrade %s, operator was not available (%s): %s", item.Name, available.Reason, available.Message))
+			case conditionHasStatus(degraded, configv1.ConditionTrue):
+				disruption.RecordJUnitResult(f, fmt.Sprintf("Operator upgrade %s", item.Name), 0, fmt.Sprintf("Failed to upgrade %s, operator was degraded (%s): %s", item.Name, degraded.Reason, degraded.Message))
+			default:
+				disruption.RecordJUnitResult(f, fmt.Sprintf("Operator upgrade %s", item.Name), 0, "")
+			}
+
+			newVersion := ""
+			if m.lastCV != nil {
+				newVersion = m.lastCV.Status.Desired.Version
+			}
 			fmt.Fprintf(tw,
 				"%s\t%s %s %s\t%s\t%s\n",
 				item.Name,
-				findConditionShortStatus(item.Status.Conditions, configv1.OperatorAvailable, configv1.ConditionTrue),
-				findConditionShortStatus(item.Status.Conditions, configv1.OperatorDegraded, configv1.ConditionFalse),
-				findConditionShortStatus(item.Status.Conditions, configv1.OperatorProgressing, configv1.ConditionFalse),
-				findVersion(item.Status.Versions, "operator", m.oldVersion, m.lastCV.Status.Desired.Version),
+				findConditionShortStatus(available, configv1.ConditionTrue),
+				findConditionShortStatus(degraded, configv1.ConditionFalse),
+				findConditionShortStatus(progressing, configv1.ConditionFalse),
+				findVersion(item.Status.Versions, "operator", m.oldVersion, newVersion),
 				findConditionMessage(item.Status.Conditions, configv1.OperatorProgressing),
 			)
 		}
@@ -211,8 +239,8 @@ func findVersion(versions []configv1.OperandVersion, name string, oldVersion, ne
 	return ""
 }
 
-func findConditionShortStatus(conditions []configv1.ClusterOperatorStatusCondition, name configv1.ClusterStatusConditionType, unless configv1.ConditionStatus) string {
-	if c := findCondition(conditions, name); c != nil {
+func findConditionShortStatus(c *configv1.ClusterOperatorStatusCondition, unless configv1.ConditionStatus) string {
+	if c != nil {
 		switch c.Status {
 		case configv1.ConditionTrue:
 			if unless == c.Status {
@@ -231,9 +259,16 @@ func findConditionShortStatus(conditions []configv1.ClusterOperatorStatusConditi
 	return " "
 }
 
+func conditionHasStatus(c *configv1.ClusterOperatorStatusCondition, status configv1.ConditionStatus) bool {
+	if c == nil {
+		return false
+	}
+	return c.Status == status
+}
+
 func findConditionMessage(conditions []configv1.ClusterOperatorStatusCondition, name configv1.ClusterStatusConditionType) string {
 	if c := findCondition(conditions, name); c != nil {
-		return c.Message
+		return strings.ReplaceAll(c.Message, "\n", " ")
 	}
 	return ""
 }
@@ -306,7 +341,7 @@ func triggerReboot(kubeClient kubernetes.Interface, target string, attempt int, 
 						RunAsUser:  &zero,
 						Privileged: &isTrue,
 					},
-					Image: "centos:7",
+					Image: image.ShellImage(),
 					Command: []string{
 						"/bin/bash",
 						"-c",

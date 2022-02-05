@@ -10,10 +10,12 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
+	k8simage "k8s.io/kubernetes/test/utils/image"
 
 	authorizationv1 "github.com/openshift/api/authorization/v1"
 
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
 )
 
 var _ = g.Describe("[sig-imageregistry][Feature:Image] oc tag", func() {
@@ -22,12 +24,16 @@ var _ = g.Describe("[sig-imageregistry][Feature:Image] oc tag", func() {
 	ctx := context.Background()
 
 	g.It("should preserve image reference for external images", func() {
-		const (
-			externalRepository = "busybox"
-			externalImage      = "busybox:latest"
-			isName             = "busybox"
-			isName2            = "busybox2"
+		var (
+			externalImage = k8simage.GetE2EImage(k8simage.BusyBox)
+			isName        = "busybox"
+			isName2       = "busybox2"
 		)
+
+		externalRepository := externalImage
+		if i := strings.LastIndex(externalRepository, ":"); i != -1 {
+			externalRepository = externalRepository[:i]
+		}
 
 		g.By("import an external image")
 
@@ -65,17 +71,17 @@ var _ = g.Describe("[sig-imageregistry][Feature:Image] oc tag", func() {
 	})
 
 	g.It("should change image reference for internal images", func() {
-		const (
+		var (
 			isName     = "localimage"
 			isName2    = "localimage2"
-			dockerfile = `FROM busybox:latest
+			dockerfile = fmt.Sprintf(`FROM %s
 RUN touch /test-image
-`
+`, image.ShellImage())
 		)
 
 		g.By("determine the name of the integrated registry")
 
-		registryHost, err := oc.Run("registry").Args("info").Output()
+		registryHost, err := oc.Run("registry").Args("info", "--internal").Output()
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("build an image")
@@ -119,7 +125,7 @@ RUN touch /test-image
 	})
 
 	g.It("should work when only imagestreams api is available", func() {
-		err := oc.Run("tag").Args("--source=docker", "busybox:latest", "testis:latest").Execute()
+		err := oc.Run("tag").Args("--source=docker", image.ShellImage(), "testis:latest").Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		err = exutil.WaitForAnImageStreamTag(oc, oc.Namespace(), "testis", "latest")
@@ -145,6 +151,9 @@ RUN touch /test-image
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		err = oc.Run("policy").Args("add-role-to-user", "testrole", "-z", "testsa", "--role-namespace="+oc.Namespace()).Execute()
+		o.Expect(err).NotTo(o.HaveOccurred())
+
+		err = exutil.WaitForServiceAccount(oc.AdminKubeClient().CoreV1().ServiceAccounts(oc.Namespace()), "testsa")
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		token, err := oc.Run("serviceaccounts").Args("get-token", "testsa").Output()

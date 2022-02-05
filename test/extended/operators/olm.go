@@ -2,18 +2,17 @@ package operators
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-
-	"github.com/google/go-github/github"
-	g "github.com/onsi/ginkgo"
-	o "github.com/onsi/gomega"
-
 	"path/filepath"
 	"strings"
 	"time"
 
+	g "github.com/onsi/ginkgo"
+	o "github.com/onsi/gomega"
+
 	exutil "github.com/openshift/origin/test/extended/util"
-	"k8s.io/apimachinery/pkg/util/wait"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 )
 
@@ -74,8 +73,8 @@ var _ = g.Describe("[sig-operator] OLM should", func() {
 				// Ensure expected version exists in spec.versions and is both served and stored
 				raw, err := oc.AsAdmin().Run("get").Args("crds", fmt.Sprintf("%s.%s", api.plural, api.group), fmt.Sprintf("-o=jsonpath={.spec.versions[?(@.name==\"%s\")]}", api.version)).Output()
 				o.Expect(err).NotTo(o.HaveOccurred())
-				o.Expect(raw).To(o.ContainSubstring("served:true"))
-				o.Expect(raw).To(o.ContainSubstring("storage:true"))
+				o.Expect(raw).To(o.MatchRegexp(`served.?:true`))
+				o.Expect(raw).To(o.MatchRegexp(`storage.?:true`))
 			}
 		})
 	}
@@ -91,7 +90,13 @@ var _ = g.Describe("[sig-operator] OLM should", func() {
 				e2e.Failf("Unable to get %s, error:%v", msg, err)
 			}
 			o.Expect(err).NotTo(o.HaveOccurred())
-			o.Expect(msg).To(o.Equal("IfNotPresent"))
+
+			// ensure that all containers in the current deployment contain the IfNotPresent
+			// image pull policy
+			policies := strings.Split(msg, " ")
+			for _, policy := range policies {
+				o.Expect(policy).To(o.Equal("IfNotPresent"))
+			}
 		}
 	})
 
@@ -110,22 +115,27 @@ var _ = g.Describe("[sig-operator] OLM should", func() {
 			e2e.Failf("No packages for evaluating if package namespace is not NULL")
 		}
 	})
+})
 
+var _ = g.Describe("[sig-arch] ocp payload should be based on existing source", func() {
+	defer g.GinkgoRecover()
+
+	var oc = exutil.NewCLIWithoutNamespace("default")
+
+	// TODO: This test should be more generic and across components
 	// OCP-20981, [BZ 1626434]The olm/catalog binary should output the exact version info
 	// author: jiazha@redhat.com
-	g.It("[Serial] olm version should contain the source commit id", func() {
+	g.It("OLM version should contain the source commit id", func() {
 		sameCommit := ""
 		subPods := []string{"catalog-operator", "olm-operator", "packageserver"}
 
 		for _, v := range subPods {
 			podName, err := oc.AsAdmin().Run("get").Args("-n", "openshift-operator-lifecycle-manager", "pods", "-l", fmt.Sprintf("app=%s", v), "-o=jsonpath={.items[0].metadata.name}").Output()
 			o.Expect(err).NotTo(o.HaveOccurred())
-			e2e.Logf("get pod name:%s", podName)
 
-			g.By(fmt.Sprintf("get olm version from the %s pod", v))
+			g.By(fmt.Sprintf("get olm version from pod %s", podName))
 			oc.SetNamespace("openshift-operator-lifecycle-manager")
-			commands := []string{"exec", podName, "--", "olm", "--version"}
-			olmVersion, err := oc.AsAdmin().Run(commands...).Args().Output()
+			olmVersion, err := oc.AsAdmin().Run("exec").Args("-n", "openshift-operator-lifecycle-manager", podName, "--", "olm", "--version").Output()
 			o.Expect(err).NotTo(o.HaveOccurred())
 			idSlice := strings.Split(olmVersion, ":")
 			gitCommitID := strings.TrimSpace(idSlice[len(idSlice)-1])
@@ -136,85 +146,151 @@ var _ = g.Describe("[sig-operator] OLM should", func() {
 
 			if sameCommit == "" {
 				sameCommit = gitCommitID
-				g.By("checking this commitID in the operator-lifecycle-manager repo")
-				client := github.NewClient(nil)
-				_, _, err := client.Git.GetCommit(context.Background(), "operator-framework", "operator-lifecycle-manager", gitCommitID)
-				if err != nil {
-					e2e.Failf("Git.GetCommit returned error: %v", err)
-				}
-				o.Expect(err).NotTo(o.HaveOccurred())
 
 			} else if gitCommitID != sameCommit {
-				e2e.Failf("These commitIDs inconformity!!!")
+				e2e.Failf("commitIDs of components within OLM do not match, possible build anomalies")
 			}
 		}
 	})
 })
 
+func archHasDefaultIndex(oc *exutil.CLI) bool {
+	workerNodes, err := oc.AsAdmin().KubeClient().CoreV1().Nodes().List(context.Background(), metav1.ListOptions{LabelSelector: "node-role.kubernetes.io/worker"})
+	if err != nil {
+		e2e.Logf("problem getting nodes for arch check: %s", err)
+	}
+	for _, node := range workerNodes.Items {
+		switch node.Status.NodeInfo.Architecture {
+		case "amd64":
+			return true
+		case "ppc64le":
+			return true
+		case "s390x":
+			return true
+		default:
+		}
+	}
+	return false
+}
+
+func hasRedHatOperatorsSource(oc *exutil.CLI) (bool, error) {
+	spec, err := oc.AsAdmin().Run("get").Args("operatorhub/cluster", "-o=jsonpath={.spec}").Output()
+	if err != nil {
+		return true, fmt.Errorf("Error reading operatorhub spec: %s", spec)
+	}
+	type Source struct {
+		Name     string `json:"name"`
+		Disabled bool   `json:"disabled"`
+	}
+	type Spec struct {
+		DisableAllDefaultSources bool     `json:"disableAllDefaultSources"`
+		Sources                  []Source `json:"sources"`
+	}
+	parsed := Spec{}
+	err = json.Unmarshal([]byte(spec), &parsed)
+	if err != nil {
+		return true, fmt.Errorf("Error unmarshalling operatorhub spec: %s", spec)
+	}
+	// Check if default hub sources are used
+	if len(parsed.Sources) == 0 && !parsed.DisableAllDefaultSources && archHasDefaultIndex(oc) {
+		return true, nil
+	}
+
+	// Check if redhat-operators is listed and not disabled
+	for _, source := range parsed.Sources {
+		if source.Name == "redhat-operators" && source.Disabled == false {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // This context will cover test case: OCP-23440, author: jiazha@redhat.com
-// Uses cockroachdb community operator - maintained by Daniel Messer. etcd operator is no longer maintained.
-var _ = g.Describe("[sig-operator] an end user use OLM", func() {
+// Uses nfd operator
+var _ = g.Describe("[sig-operator] an end user can use OLM", func() {
 	defer g.GinkgoRecover()
 
 	var (
-		oc           = exutil.NewCLI("olm-23440")
-		operatorWait = 150 * time.Second
+		oc = exutil.NewCLI("olm-23440")
 
 		buildPruningBaseDir = exutil.FixturePath("testdata", "olm")
 		operatorGroup       = filepath.Join(buildPruningBaseDir, "operatorgroup.yaml")
-		cockroachDBSub      = filepath.Join(buildPruningBaseDir, "cockroachdb-subscription.yaml")
+		sub                 = filepath.Join(buildPruningBaseDir, "subscription.yaml")
 	)
 
-	files := []string{cockroachDBSub}
-	g.It("can subscribe to the cockroachdb operator", func() {
+	files := []string{sub}
+	g.It("can subscribe to the operator", func() {
 		g.By("Cluster-admin user subscribe the operator resource")
 
+		// skip test if redhat-operators is not present or disabled
+		ok, err := hasRedHatOperatorsSource(oc)
+		o.Expect(err).NotTo(o.HaveOccurred())
+		if !ok {
+			g.Skip("redhat-operators source not found in enabled sources")
+		}
+
 		// configure OperatorGroup before tests
-		configFile, err := oc.AsAdmin().Run("process").Args("--ignore-unknown-parameters=true", "-f", operatorGroup, "-p", "NAME=test-operator", fmt.Sprintf("NAMESPACE=%s", oc.Namespace()), "SOURCENAME=community-operators", "SOURCENAMESPACE=openshift-marketplace").OutputToFile("config.json")
+		configFile, err := oc.AsAdmin().Run("process").Args("--ignore-unknown-parameters=true", "-f", operatorGroup, "-p", "NAME=test-operator", fmt.Sprintf("NAMESPACE=%s", oc.Namespace())).OutputToFile("config.json")
 		o.Expect(err).NotTo(o.HaveOccurred())
 		err = oc.AsAdmin().WithoutNamespace().Run("create").Args("-f", configFile).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
-		err = wait.Poll(10*time.Second, operatorWait, func() (bool, error) {
-			output, err := oc.AsAdmin().Run("get").Args("-n", oc.Namespace(), "operatorgroup", "test-operator", "-o=jsonpath={.status.namespaces}").Output()
+
+		o.Eventually(func() []string {
+			// Using json output instead of jsonpath - oc/jsonpath bug seems to improperly decode `[""]` as `[]`
+			output, err := oc.AsAdmin().Run("get").Args("-n", oc.Namespace(), "operatorgroup", "test-operator", "-o=json").Output()
 			if err != nil {
 				e2e.Logf("Failed to get valid operatorgroup, error:%v", err)
-				return false, nil
+				return []string{""}
 			}
-			if strings.Contains(output, oc.Namespace()) {
-				return true, nil
+			type ogStatus struct {
+				Namespaces []string `json:"namespaces"`
 			}
-			e2e.Logf("%#v", output)
-			return false, nil
-		})
-		o.Expect(err).NotTo(o.HaveOccurred())
+			type og struct {
+				Status ogStatus `json:"status"`
+			}
+			parsed := og{
+				Status: ogStatus{
+					Namespaces: []string{},
+				},
+			}
+			if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+				e2e.Logf("Failed to parse operatorgroup, error:%v", err)
+				return []string{""}
+			}
+			return parsed.Status.Namespaces
+		}, 5*time.Minute, time.Second).Should(o.Equal([]string{""}))
 
 		for _, v := range files {
-			configFile, err := oc.AsAdmin().Run("process").Args("--ignore-unknown-parameters=true", "-f", v, "-p", "NAME=test-operator", fmt.Sprintf("NAMESPACE=%s", oc.Namespace()), "SOURCENAME=community-operators", "SOURCENAMESPACE=openshift-marketplace").OutputToFile("config.json")
+			configFile, err := oc.AsAdmin().Run("process").Args("--ignore-unknown-parameters=true", "-f", v, "-p", "NAME=test-operator", fmt.Sprintf("NAMESPACE=%s", oc.Namespace()), "SOURCENAME=redhat-operators", "SOURCENAMESPACE=openshift-marketplace", "PACKAGE=cluster-logging", "CHANNEL=stable").OutputToFile("config.json")
 			o.Expect(err).NotTo(o.HaveOccurred())
 			err = oc.AsAdmin().WithoutNamespace().Run("create").Args("-f", configFile).Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 		}
-		err = wait.Poll(10*time.Second, operatorWait, func() (bool, error) {
-			output, err := oc.AsAdmin().Run("get").Args("-n", oc.Namespace(), "csv", "cockroachdb.v2.1.11", "-o=jsonpath={.status.phase}").Output()
+
+		var current string
+		o.Eventually(func() string {
+			var err error
+			current, err = oc.AsAdmin().Run("get").Args("-n", oc.Namespace(), "subscription", "test-operator", "-o=jsonpath={.status.installedCSV}").Output()
 			if err != nil {
-				e2e.Logf("Failed to check cockroachdb.v2.1.11, error:%v, try next round", err)
-				return false, nil
+				e2e.Logf("Failed to check test-operator, error: %v, try next round", err)
 			}
-			e2e.Logf("the output is %s", output)
-			if strings.Contains(output, "Succeeded") {
-				return true, nil
+			return current
+		}, 5*time.Minute, time.Second).ShouldNot(o.Equal(""))
+
+		defer func() {
+			// clean up so that it doesn't emit an alert when namespace is deleted
+			_, err = oc.AsAdmin().Run("delete").Args("-n", oc.Namespace(), "csv", current).Output()
+			o.Expect(err).NotTo(o.HaveOccurred())
+		}()
+
+		o.Eventually(func() string {
+			output, err := oc.AsAdmin().Run("get").Args("-n", oc.Namespace(), "csv", current, "-o=jsonpath={.status.phase}").Output()
+			if err != nil {
+				e2e.Logf("Failed to check %s, error: %v, try next round", current, err)
 			}
-			return false, nil
-		})
-		o.Expect(err).NotTo(o.HaveOccurred())
+			return output
 
-		output, err := oc.Run("get").Args("deployments", "-n", oc.Namespace()).Output()
-		o.Expect(err).NotTo(o.HaveOccurred())
-		o.Expect(output).To(o.ContainSubstring("cockroachdb"))
-
-		// clean up so that it doesn't emit an alert when namespace is deleted
-		_, err = oc.AsAdmin().Run("delete").Args("-n", oc.Namespace(), "csv", "cockroachdb.v2.1.11").Output()
-		o.Expect(err).NotTo(o.HaveOccurred())
+		}, 5*time.Minute, time.Second).ShouldNot(o.BeEmpty())
 	})
 
 	// OCP-24829 - Report `Upgradeable` in OLM ClusterOperators status

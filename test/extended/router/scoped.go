@@ -67,9 +67,9 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			ns := oc.KubeFramework().Namespace.Name
-			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
 			defer func() {
-				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPodName, *metav1.NewDeleteOptions(1))
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
 			}()
 
 			var routerIP string
@@ -78,11 +78,10 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 				if err != nil {
 					return false, err
 				}
-				if len(pod.Status.PodIP) == 0 {
-					return false, nil
-				}
 				routerIP = pod.Status.PodIP
-				return true, nil
+				podIsReady := podConditionStatus(pod, corev1.PodReady)
+
+				return len(routerIP) != 0 && podIsReady == corev1.ConditionTrue, nil
 			})
 			o.Expect(err).NotTo(o.HaveOccurred())
 
@@ -91,16 +90,16 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 
 			g.By("waiting for the healthz endpoint to respond")
 			healthzURI := fmt.Sprintf("http://%s:1936/healthz", routerIP)
-			err = waitForRouterOKResponseExec(ns, execPodName, healthzURI, routerIP, changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, healthzURI, routerIP, changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for the valid route to respond")
-			err = waitForRouterOKResponseExec(ns, execPodName, routerURL+"/Letter", "FIRST.example.com", changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, routerURL+"/Letter", "FIRST.example.com", changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			for _, host := range []string{"second.example.com", "third.example.com"} {
 				g.By(fmt.Sprintf("checking that %s does not match a route", host))
-				err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusServiceUnavailable)
+				err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusServiceUnavailable)
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 		})
@@ -113,9 +112,9 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			ns := oc.KubeFramework().Namespace.Name
-			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
 			defer func() {
-				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPodName, *metav1.NewDeleteOptions(1))
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
 			}()
 
 			var routerIP string
@@ -124,11 +123,10 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 				if err != nil {
 					return false, err
 				}
-				if len(pod.Status.PodIP) == 0 {
-					return false, nil
-				}
 				routerIP = pod.Status.PodIP
-				return true, nil
+				podIsReady := podConditionStatus(pod, corev1.PodReady)
+
+				return len(routerIP) != 0 && podIsReady == corev1.ConditionTrue, nil
 			})
 
 			o.Expect(err).NotTo(o.HaveOccurred())
@@ -139,22 +137,22 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 
 			g.By("waiting for the healthz endpoint to respond")
 			healthzURI := fmt.Sprintf("http://%s:1936/healthz", routerIP)
-			err = waitForRouterOKResponseExec(ns, execPodName, healthzURI, routerIP, changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, healthzURI, routerIP, changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for the valid route to respond")
-			err = waitForRouterOKResponseExec(ns, execPodName, routerURL+"/Letter", fmt.Sprintf(pattern, "route-1", ns), changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, routerURL+"/Letter", fmt.Sprintf(pattern, "route-1", ns), changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("checking that the stored domain name does not match a route")
 			host := "first.example.com"
-			err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusServiceUnavailable)
+			err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusServiceUnavailable)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			for _, host := range []string{"route-1", "route-2"} {
 				host = fmt.Sprintf(pattern, host, ns)
 				g.By(fmt.Sprintf("checking that %s matches a route", host))
-				err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusOK)
+				err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusOK)
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 
@@ -178,9 +176,9 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			ns := oc.KubeFramework().Namespace.Name
-			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
 			defer func() {
-				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPodName, *metav1.NewDeleteOptions(1))
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
 			}()
 
 			g.By(fmt.Sprintf("creating a scoped router with overridden domains from a config file %q", configPath))
@@ -191,11 +189,10 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 				if err != nil {
 					return false, err
 				}
-				if len(pod.Status.PodIP) == 0 {
-					return false, nil
-				}
 				routerIP = pod.Status.PodIP
-				return true, nil
+				podIsReady := podConditionStatus(pod, corev1.PodReady)
+
+				return len(routerIP) != 0 && podIsReady == corev1.ConditionTrue, nil
 			})
 
 			o.Expect(err).NotTo(o.HaveOccurred())
@@ -206,22 +203,22 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 
 			g.By("waiting for the healthz endpoint to respond")
 			healthzURI := fmt.Sprintf("http://%s:1936/healthz", routerIP)
-			err = waitForRouterOKResponseExec(ns, execPodName, healthzURI, routerIP, changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, healthzURI, routerIP, changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for the valid route to respond")
-			err = waitForRouterOKResponseExec(ns, execPodName, routerURL+"/Letter", fmt.Sprintf(pattern, "route-override-domain-1", ns), changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, routerURL+"/Letter", fmt.Sprintf(pattern, "route-override-domain-1", ns), changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("checking that the stored domain name does not match a route")
 			host := "y.a.null.ptr"
-			err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusServiceUnavailable)
+			err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusServiceUnavailable)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			for _, host := range []string{"route-override-domain-1", "route-override-domain-2"} {
 				host = fmt.Sprintf(pattern, host, ns)
 				g.By(fmt.Sprintf("checking that %s matches a route", host))
-				err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusOK)
+				err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusOK)
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 
@@ -241,24 +238,31 @@ var _ = g.Describe("[sig-network][Feature:Router]", func() {
 func waitForRouterOKResponseExec(ns, execPodName, url, host string, timeoutSeconds int) error {
 	cmd := fmt.Sprintf(`
 		set -e
-		STOP=$(($(date '+%%s') + %d))
+		pass=%[4]d
+		STOP=$(($(date '+%%s') + %[1]d))
 		while [ $(date '+%%s') -lt $STOP ]; do
 			rc=0
-			code=$( curl -k -s -m 5 -o /dev/null -w '%%{http_code}\n' --header 'Host: %s' %q ) || rc=$?
+			code=$( curl -k -s -m 5 -o /dev/null -w '%%{http_code}\n' --header 'Host: %[2]s' %[3]q ) || rc=$?
 			if [[ "${rc:-0}" -eq 0 ]]; then
 				echo $code
 				if [[ $code -eq 200 ]]; then
-					exit 0
+					pass=$(( pass - 1 ))
+					if [[ $pass -le 0 ]]; then
+						exit 0
+					fi
+					sleep 1
+					continue
 				fi
 				if [[ $code -ne 503 ]]; then
 					exit 1
 				fi
+				pass=%[4]d
 			else
 				echo "error ${rc}" 1>&2
 			fi
 			sleep 1
 		done
-		`, timeoutSeconds, host, url)
+		`, timeoutSeconds, host, url, 5)
 	output, err := e2e.RunHostCmd(ns, execPodName, cmd)
 	if err != nil {
 		return fmt.Errorf("host command failed: %v\n%s", err, output)

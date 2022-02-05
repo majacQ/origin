@@ -84,7 +84,6 @@ type FlowSchemaList struct {
 	metav1.ListMeta
 
 	// `items` is a list of FlowSchemas.
-	// +listType=set
 	Items []FlowSchema
 }
 
@@ -172,13 +171,17 @@ type PolicyRulesWithSubjects struct {
 // ways of matching an originator; by user, group, or service account.
 // +union
 type Subject struct {
+	// `kind` indicates which one of the other fields is non-empty.
 	// Required
 	// +unionDiscriminator
 	Kind SubjectKind
+	// `user` matches based on username.
 	// +optional
 	User *UserSubject
+	// `group` matches based on user group name.
 	// +optional
 	Group *GroupSubject
+	// `serviceAccount` matches ServiceAccounts.
 	// +optional
 	ServiceAccount *ServiceAccountSubject
 }
@@ -350,7 +353,6 @@ type PriorityLevelConfigurationList struct {
 	// +optional
 	metav1.ListMeta
 	// `items` is a list of request-priorities.
-	// +listType=set
 	Items []PriorityLevelConfiguration
 }
 

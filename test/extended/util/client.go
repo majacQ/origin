@@ -1,9 +1,9 @@
 package util
 
 import (
-	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -17,6 +17,9 @@ import (
 	"strings"
 	"time"
 
+	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+
+	yaml "gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
@@ -70,6 +73,7 @@ type CLI struct {
 	verb               string
 	configPath         string
 	adminConfigPath    string
+	token              string
 	username           string
 	globalArgs         []string
 	commandArgs        []string
@@ -107,8 +111,9 @@ func NewCLIWithFramework(kubeFramework *framework.Framework) *CLI {
 // namespace. Should be called outside of a Ginkgo .It() function.
 func NewCLI(project string) *CLI {
 	cli := NewCLIWithoutNamespace(project)
+	cli.withoutNamespace = false
 	// create our own project
-	g.BeforeEach(cli.SetupProject)
+	g.BeforeEach(func() { _ = cli.SetupProject() })
 	return cli
 }
 
@@ -125,10 +130,12 @@ func NewCLIWithoutNamespace(project string) *CLI {
 				ClientQPS:   20,
 				ClientBurst: 50,
 			},
+			Timeouts: framework.NewTimeoutContextWithDefaults(),
 		},
-		username:        "admin",
-		execPath:        "oc",
-		adminConfigPath: KubeConfigPath(),
+		username:         "admin",
+		execPath:         "oc",
+		adminConfigPath:  KubeConfigPath(),
+		withoutNamespace: true,
 	}
 	g.AfterEach(cli.TeardownProject)
 	g.AfterEach(cli.kubeFramework.AfterEach)
@@ -196,9 +203,40 @@ func (c CLI) WithoutNamespace() *CLI {
 	return &c
 }
 
+// WithToken instructs the command should be invoked with --token rather than --kubeconfig flag
+func (c CLI) WithToken(token string) *CLI {
+	c.configPath = ""
+	c.token = token
+	return &c
+}
+
+// SetupNamespace creates a namespace, without waiting for any resources except the SCC annotation to be available
+func (c *CLI) SetupNamespace() string {
+	requiresTestStart()
+	newNamespace := names.SimpleNameGenerator.GenerateName(fmt.Sprintf("e2e-test-%s-", c.kubeFramework.BaseName))
+	c.SetNamespace(newNamespace)
+
+	framework.Logf("Creating namespace %q", newNamespace)
+	_, err := c.AdminKubeClient().CoreV1().Namespaces().Create(context.Background(), &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{Name: newNamespace},
+	}, metav1.CreateOptions{})
+	o.Expect(err).NotTo(o.HaveOccurred())
+
+	c.kubeFramework.AddNamespacesToDelete(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: newNamespace}})
+
+	WaitForNamespaceSCCAnnotations(c.AdminKubeClient().CoreV1(), newNamespace)
+	for _, sa := range []string{"default"} {
+		framework.Logf("Waiting for ServiceAccount %q to be provisioned...", sa)
+		err = WaitForServiceAccount(c.AdminKubeClient().CoreV1().ServiceAccounts(newNamespace), sa)
+		o.Expect(err).NotTo(o.HaveOccurred())
+	}
+	return newNamespace
+}
+
 // SetupProject creates a new project and assign a random user to the project.
 // All resources will be then created within this project.
-func (c *CLI) SetupProject() {
+// Returns the name of the new project.
+func (c *CLI) SetupProject() string {
 	requiresTestStart()
 	newNamespace := names.SimpleNameGenerator.GenerateName(fmt.Sprintf("e2e-test-%s-", c.kubeFramework.BaseName))
 	c.SetNamespace(newNamespace).ChangeUser(fmt.Sprintf("%s-user", newNamespace))
@@ -276,9 +314,10 @@ func (c *CLI) SetupProject() {
 		o.Expect(err).NotTo(o.HaveOccurred())
 	}
 
-	WaitForNamespaceSCCAnnotations(c.ProjectClient().ProjectV1(), newNamespace)
+	WaitForProjectSCCAnnotations(c.ProjectClient().ProjectV1(), newNamespace)
 
 	framework.Logf("Project %q has been fully provisioned.", newNamespace)
+	return newNamespace
 }
 
 func (c *CLI) setupSelfProvisionerRoleBinding() error {
@@ -472,7 +511,7 @@ func (c *CLI) AdminDynamicClient() dynamic.Interface {
 }
 
 func (c *CLI) UserConfig() *rest.Config {
-	clientConfig, err := getClientConfig(c.configPath)
+	clientConfig, err := GetClientConfig(c.configPath)
 	if err != nil {
 		FatalErr(err)
 	}
@@ -480,7 +519,7 @@ func (c *CLI) UserConfig() *rest.Config {
 }
 
 func (c *CLI) AdminConfig() *rest.Config {
-	clientConfig, err := getClientConfig(c.adminConfigPath)
+	clientConfig, err := GetClientConfig(c.adminConfigPath)
 	if err != nil {
 		FatalErr(err)
 	}
@@ -515,27 +554,19 @@ func (c *CLI) Run(commands ...string) *CLI {
 		adminConfigPath: c.adminConfigPath,
 		configPath:      c.configPath,
 		username:        c.username,
-		globalArgs: append([]string{
-			fmt.Sprintf("--kubeconfig=%s", c.configPath),
-		}, commands...),
+		globalArgs:      commands,
+	}
+	if len(c.configPath) > 0 {
+		nc.globalArgs = append([]string{fmt.Sprintf("--kubeconfig=%s", c.configPath)}, nc.globalArgs...)
+	}
+	if len(c.configPath) == 0 && len(c.token) > 0 {
+		nc.globalArgs = append([]string{fmt.Sprintf("--token=%s", c.token)}, nc.globalArgs...)
 	}
 	if !c.withoutNamespace {
 		nc.globalArgs = append([]string{fmt.Sprintf("--namespace=%s", c.Namespace())}, nc.globalArgs...)
 	}
 	nc.stdin, nc.stdout, nc.stderr = in, out, errout
 	return nc.setOutput(c.stdout)
-}
-
-// Template sets a Go template for the OpenShift CLI command.
-// This is equivalent of running "oc get foo -o template --template='{{ .spec }}'"
-func (c *CLI) Template(t string) *CLI {
-	if c.verb != "get" {
-		FatalErr("Cannot use Template() for non-get verbs.")
-	}
-	templateArgs := []string{"--output=template", fmt.Sprintf("--template=%s", t)}
-	commandArgs := append(c.commandArgs, templateArgs...)
-	c.finalArgs = append(c.globalArgs, commandArgs...)
-	return c
 }
 
 // InputString adds expected input to the command
@@ -547,7 +578,6 @@ func (c *CLI) InputString(input string) *CLI {
 // Args sets the additional arguments for the OpenShift CLI command
 func (c *CLI) Args(args ...string) *CLI {
 	c.commandArgs = args
-	c.finalArgs = append(c.globalArgs, c.commandArgs...)
 	return c
 }
 
@@ -563,52 +593,55 @@ type ExitError struct {
 
 // Output executes the command and returns stdout/stderr combined into one string
 func (c *CLI) Output() (string, error) {
-	if c.verbose {
-		fmt.Printf("DEBUG: oc %s\n", c.printCmd())
-	}
-	cmd := exec.Command(c.execPath, c.finalArgs...)
-	cmd.Stdin = c.stdin
-	framework.Logf("Running '%s %s'", c.execPath, strings.Join(c.finalArgs, " "))
-	out, err := cmd.CombinedOutput()
-	trimmed := strings.TrimSpace(string(out))
-	switch err.(type) {
-	case nil:
-		c.stdout = bytes.NewBuffer(out)
-		return trimmed, nil
-	case *exec.ExitError:
-		// avoid excessively long lines in the error output if a command generates a giant amount of logging
-		const maxLength = 809
-		shortened := trimmed
-		if len(shortened) > maxLength {
-			shortened = shortened[:maxLength/2] + "\n...\n" + shortened[len(shortened)-(maxLength/2):]
-		}
-		framework.Logf("Error running %v:\n%s", cmd, shortened)
-		return trimmed, &ExitError{ExitError: err.(*exec.ExitError), Cmd: c.execPath + " " + strings.Join(c.finalArgs, " "), StdErr: shortened}
-	default:
-		FatalErr(fmt.Errorf("unable to execute %q: %v", c.execPath, err))
-		// unreachable code
-		return "", nil
-	}
+	var buff bytes.Buffer
+	_, _, err := c.outputs(&buff, &buff)
+	return strings.TrimSpace(string(buff.Bytes())), err
 }
 
 // Outputs executes the command and returns the stdout/stderr output as separate strings
 func (c *CLI) Outputs() (string, string, error) {
+	var stdOutBuff, stdErrBuff bytes.Buffer
+	return c.outputs(&stdOutBuff, &stdErrBuff)
+}
+
+// Background executes the command in the background and returns the Cmd object
+// which may be killed later via cmd.Process.Kill().  It also returns buffers
+// holding the stdout & stderr of the command, which may be read from only after
+// calling cmd.Wait().
+func (c *CLI) Background() (*exec.Cmd, *bytes.Buffer, *bytes.Buffer, error) {
+	var stdOutBuff, stdErrBuff bytes.Buffer
+	cmd, err := c.start(&stdOutBuff, &stdErrBuff)
+	return cmd, &stdOutBuff, &stdErrBuff, err
+}
+
+func (c *CLI) start(stdOutBuff, stdErrBuff *bytes.Buffer) (*exec.Cmd, error) {
+	c.finalArgs = append(c.globalArgs, c.commandArgs...)
 	if c.verbose {
 		fmt.Printf("DEBUG: oc %s\n", c.printCmd())
 	}
 	cmd := exec.Command(c.execPath, c.finalArgs...)
 	cmd.Stdin = c.stdin
 	framework.Logf("Running '%s %s'", c.execPath, strings.Join(c.finalArgs, " "))
-	//out, err := cmd.CombinedOutput()
-	var stdErrBuff, stdOutBuff bytes.Buffer
-	cmd.Stdout = &stdOutBuff
-	cmd.Stderr = &stdErrBuff
-	err := cmd.Run()
+
+	cmd.Stdout = stdOutBuff
+	cmd.Stderr = stdErrBuff
+	err := cmd.Start()
+
+	return cmd, err
+}
+
+func (c *CLI) outputs(stdOutBuff, stdErrBuff *bytes.Buffer) (string, string, error) {
+	cmd, err := c.start(stdOutBuff, stdErrBuff)
+	if err != nil {
+		return "", "", err
+	}
+	err = cmd.Wait()
 
 	stdOutBytes := stdOutBuff.Bytes()
 	stdErrBytes := stdErrBuff.Bytes()
 	stdOut := strings.TrimSpace(string(stdOutBytes))
 	stdErr := strings.TrimSpace(string(stdErrBytes))
+
 	switch err.(type) {
 	case nil:
 		c.stdout = bytes.NewBuffer(stdOutBytes)
@@ -624,50 +657,9 @@ func (c *CLI) Outputs() (string, string, error) {
 	}
 }
 
-// Background executes the command in the background and returns the Cmd object
-// which may be killed later via cmd.Process.Kill().  It also returns buffers
-// holding the stdout & stderr of the command, which may be read from only after
-// calling cmd.Wait().
-func (c *CLI) Background() (*exec.Cmd, *bytes.Buffer, *bytes.Buffer, error) {
-	if c.verbose {
-		fmt.Printf("DEBUG: oc %s\n", c.printCmd())
-	}
-	cmd := exec.Command(c.execPath, c.finalArgs...)
-	cmd.Stdin = c.stdin
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = bufio.NewWriter(&stdout)
-	cmd.Stderr = bufio.NewWriter(&stderr)
-
-	framework.Logf("Running '%s %s'", c.execPath, strings.Join(c.finalArgs, " "))
-
-	err := cmd.Start()
-	return cmd, &stdout, &stderr, err
-}
-
-// BackgroundRC executes the command in the background and returns the Cmd
-// object which may be killed later via cmd.Process.Kill().  It returns a
-// ReadCloser for stdout.  If in doubt, use Background().  Consult the os/exec
-// documentation.
-func (c *CLI) BackgroundRC() (*exec.Cmd, io.ReadCloser, error) {
-	if c.verbose {
-		fmt.Printf("DEBUG: oc %s\n", c.printCmd())
-	}
-	cmd := exec.Command(c.execPath, c.finalArgs...)
-	cmd.Stdin = c.stdin
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, err
-	}
-
-	framework.Logf("Running '%s %s'", c.execPath, strings.Join(c.finalArgs, " "))
-
-	err = cmd.Start()
-	return cmd, stdout, err
-}
-
 // OutputToFile executes the command and store output to a file
 func (c *CLI) OutputToFile(filename string) (string, error) {
-	content, err := c.Output()
+	content, _, err := c.Outputs()
 	if err != nil {
 		return "", err
 	}
@@ -744,14 +736,9 @@ func (c *CLI) GetClientConfigForUser(username string) *rest.Config {
 		c.AddExplicitResourceToDelete(oauthv1.GroupVersion.WithResource("oauthclients"), "", oauthClientName)
 	}
 
-	randomToken := uuid.NewRandom()
-	accesstoken := base64.RawURLEncoding.EncodeToString([]byte(randomToken))
-	// make sure the token is long enough to pass validation
-	for i := len(accesstoken); i < 32; i++ {
-		accesstoken += "A"
-	}
+	privToken, pubToken := GenerateOAuthTokenPair()
 	token, err := oauthClient.OauthV1().OAuthAccessTokens().Create(ctx, &oauthv1.OAuthAccessToken{
-		ObjectMeta:  metav1.ObjectMeta{Name: accesstoken},
+		ObjectMeta:  metav1.ObjectMeta{Name: pubToken},
 		ClientName:  oauthClientName,
 		UserName:    username,
 		UserUID:     string(user.UID),
@@ -764,9 +751,20 @@ func (c *CLI) GetClientConfigForUser(username string) *rest.Config {
 	c.AddResourceToDelete(oauthv1.GroupVersion.WithResource("oauthaccesstokens"), token)
 
 	userClientConfig := rest.AnonymousClientConfig(turnOffRateLimiting(rest.CopyConfig(c.AdminConfig())))
-	userClientConfig.BearerToken = token.Name
+	userClientConfig.BearerToken = privToken
 
 	return userClientConfig
+}
+
+// GenerateOAuthTokenPair returns two tokens to use with OpenShift OAuth-based authentication.
+// The first token is a private token meant to be used as a Bearer token to send
+// queries to the API, the second token is a hashed token meant to be stored in
+// the database.
+func GenerateOAuthTokenPair() (privToken, pubToken string) {
+	const sha256Prefix = "sha256~"
+	randomToken := base64.RawURLEncoding.EncodeToString(uuid.NewRandom())
+	hashed := sha256.Sum256([]byte(randomToken))
+	return sha256Prefix + string(randomToken), sha256Prefix + base64.RawURLEncoding.EncodeToString(hashed[:])
 }
 
 // turnOffRateLimiting reduces the chance that a flaky test can be written while using this package
@@ -815,7 +813,7 @@ func waitForAccess(c kubernetes.Interface, allowed bool, review *kubeauthorizati
 	})
 }
 
-func getClientConfig(kubeConfigFile string) (*rest.Config, error) {
+func GetClientConfig(kubeConfigFile string) (*rest.Config, error) {
 	kubeConfigBytes, err := ioutil.ReadFile(kubeConfigFile)
 	if err != nil {
 		return nil, err
@@ -851,4 +849,38 @@ func defaultClientTransport(rt http.RoundTripper) http.RoundTripper {
 	// TODO: this should be configured by the caller, not in this method.
 	transport.MaxIdleConnsPerHost = 100
 	return transport
+}
+
+const (
+	installConfigName = "cluster-config-v1"
+)
+
+// installConfig The subset of openshift-install's InstallConfig we parse for this test
+type installConfig struct {
+	FIPS bool `json:"fips,omitempty"`
+}
+
+func IsFIPS(client clientcorev1.ConfigMapsGetter) (bool, error) {
+	// this currently uses an install config because it has a lower dependency threshold than going directly to the node.
+	installConfig, err := installConfigFromCluster(client)
+	if err != nil {
+		return false, err
+	}
+	return installConfig.FIPS, nil
+}
+
+func installConfigFromCluster(client clientcorev1.ConfigMapsGetter) (*installConfig, error) {
+	cm, err := client.ConfigMaps("kube-system").Get(context.Background(), installConfigName, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	data, ok := cm.Data["install-config"]
+	if !ok {
+		return nil, fmt.Errorf("no install-config found in kube-system/%s", installConfigName)
+	}
+	config := &installConfig{}
+	if err := yaml.Unmarshal([]byte(data), config); err != nil {
+		return nil, err
+	}
+	return config, nil
 }

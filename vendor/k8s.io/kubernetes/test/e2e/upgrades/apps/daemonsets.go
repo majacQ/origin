@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package upgrades
+package apps
 
 import (
 	"context"
@@ -122,7 +122,6 @@ func (t *DaemonSetUpgradeTest) validateRunningDaemonSet(f *framework.Framework) 
 	res, err = checkDaemonStatus(f, t.daemonSet.Namespace, t.daemonSet.Name)
 	framework.ExpectNoError(err)
 	if !res {
-		framework.DumpAllNamespaceInfo(f.ClientSet, t.daemonSet.Namespace)
 		framework.Failf("expected DaemonSet to be in a good state, it was not")
 	}
 }

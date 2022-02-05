@@ -30,6 +30,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
+	apiserverserviceaccount "k8s.io/apiserver/pkg/authentication/serviceaccount"
 	informers "k8s.io/client-go/informers/core/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	listersv1 "k8s.io/client-go/listers/core/v1"
@@ -37,7 +38,7 @@ import (
 	clientretry "k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/prometheus/ratelimiter"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/registry/core/secret"
 	"k8s.io/kubernetes/pkg/serviceaccount"
 )
@@ -511,7 +512,7 @@ func (e *TokensController) hasReferencedToken(serviceAccount *v1.ServiceAccount)
 func (e *TokensController) secretUpdateNeeded(secret *v1.Secret) (bool, bool, bool, bool) {
 	caData := secret.Data[v1.ServiceAccountRootCAKey]
 	needsCA := len(e.rootCA) > 0 && !bytes.Equal(caData, e.rootCA)
-	needsServiceServingCA := bytes.Compare(secret.Data[ServiceServingCASecretKey], e.serviceServingCA) != 0
+	needsServiceServingCA := len(e.serviceServingCA) > 0 && bytes.Compare(secret.Data[ServiceServingCASecretKey], e.serviceServingCA) != 0
 
 	needsNamespace := len(secret.Data[v1.ServiceAccountNamespaceKey]) == 0
 
@@ -560,11 +561,7 @@ func (e *TokensController) generateTokenIfNeeded(serviceAccount *v1.ServiceAccou
 		liveSecret.Data[v1.ServiceAccountRootCAKey] = e.rootCA
 	}
 	if needsServiceServingCA {
-		if len(e.serviceServingCA) > 0 {
-			liveSecret.Data[ServiceServingCASecretKey] = e.serviceServingCA
-		} else {
-			delete(liveSecret.Data, ServiceServingCASecretKey)
-		}
+		liveSecret.Data[ServiceServingCASecretKey] = e.serviceServingCA
 	}
 	// Set the namespace
 	if needsNamespace {
@@ -717,7 +714,7 @@ func (e *TokensController) listTokenSecrets(serviceAccount *v1.ServiceAccount) (
 	for _, obj := range namespaceSecrets {
 		secret := obj.(*v1.Secret)
 
-		if serviceaccount.IsServiceAccountToken(secret, serviceAccount) {
+		if apiserverserviceaccount.IsServiceAccountToken(secret, serviceAccount) {
 			items = append(items, secret)
 		}
 	}

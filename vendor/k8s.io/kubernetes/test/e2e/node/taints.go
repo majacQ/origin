@@ -18,15 +18,12 @@ package node
 
 import (
 	"context"
-	"fmt"
 	"time"
 
-	"k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
@@ -191,9 +188,9 @@ var _ = SIGDescribe("NoExecuteTaintManager Single Pod [Serial]", func() {
 
 		ginkgo.By("Trying to apply a taint on the Node")
 		testTaint := getTestTaint()
-		framework.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
+		e2enode.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
 		framework.ExpectNodeHasTaint(cs, nodeName, &testTaint)
-		defer framework.RemoveTaintOffNode(cs, nodeName, testTaint)
+		defer e2enode.RemoveTaintOffNode(cs, nodeName, testTaint)
 
 		// Wait a bit
 		ginkgo.By("Waiting for Pod to be deleted")
@@ -223,9 +220,9 @@ var _ = SIGDescribe("NoExecuteTaintManager Single Pod [Serial]", func() {
 
 		ginkgo.By("Trying to apply a taint on the Node")
 		testTaint := getTestTaint()
-		framework.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
+		e2enode.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
 		framework.ExpectNodeHasTaint(cs, nodeName, &testTaint)
-		defer framework.RemoveTaintOffNode(cs, nodeName, testTaint)
+		defer e2enode.RemoveTaintOffNode(cs, nodeName, testTaint)
 
 		// Wait a bit
 		ginkgo.By("Waiting for Pod to be deleted")
@@ -256,9 +253,9 @@ var _ = SIGDescribe("NoExecuteTaintManager Single Pod [Serial]", func() {
 
 		ginkgo.By("Trying to apply a taint on the Node")
 		testTaint := getTestTaint()
-		framework.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
+		e2enode.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
 		framework.ExpectNodeHasTaint(cs, nodeName, &testTaint)
-		defer framework.RemoveTaintOffNode(cs, nodeName, testTaint)
+		defer e2enode.RemoveTaintOffNode(cs, nodeName, testTaint)
 
 		// Wait a bit
 		ginkgo.By("Waiting to see if a Pod won't be deleted")
@@ -282,7 +279,7 @@ var _ = SIGDescribe("NoExecuteTaintManager Single Pod [Serial]", func() {
 	})
 
 	/*
-		Release : v1.16
+		Release: v1.16
 		Testname: Taint, Pod Eviction on taint removal
 		Description: The Pod with toleration timeout scheduled on a tainted Node MUST not be
 		evicted if the taint is removed before toleration time ends.
@@ -303,12 +300,12 @@ var _ = SIGDescribe("NoExecuteTaintManager Single Pod [Serial]", func() {
 		// 2. Taint the node running this pod with a no-execute taint
 		ginkgo.By("Trying to apply a taint on the Node")
 		testTaint := getTestTaint()
-		framework.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
+		e2enode.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
 		framework.ExpectNodeHasTaint(cs, nodeName, &testTaint)
 		taintRemoved := false
 		defer func() {
 			if !taintRemoved {
-				framework.RemoveTaintOffNode(cs, nodeName, testTaint)
+				e2enode.RemoveTaintOffNode(cs, nodeName, testTaint)
 			}
 		}()
 
@@ -325,7 +322,7 @@ var _ = SIGDescribe("NoExecuteTaintManager Single Pod [Serial]", func() {
 
 		// 4. Remove the taint
 		framework.Logf("Removing taint from Node")
-		framework.RemoveTaintOffNode(cs, nodeName, testTaint)
+		e2enode.RemoveTaintOffNode(cs, nodeName, testTaint)
 		taintRemoved = true
 
 		// 5. See if Pod won't be evicted.
@@ -377,13 +374,13 @@ var _ = SIGDescribe("NoExecuteTaintManager Multiple Pods [Serial]", func() {
 
 		ginkgo.By("Trying to apply a taint on the Nodes")
 		testTaint := getTestTaint()
-		framework.AddOrUpdateTaintOnNode(cs, nodeName1, testTaint)
+		e2enode.AddOrUpdateTaintOnNode(cs, nodeName1, testTaint)
 		framework.ExpectNodeHasTaint(cs, nodeName1, &testTaint)
-		defer framework.RemoveTaintOffNode(cs, nodeName1, testTaint)
+		defer e2enode.RemoveTaintOffNode(cs, nodeName1, testTaint)
 		if nodeName2 != nodeName1 {
-			framework.AddOrUpdateTaintOnNode(cs, nodeName2, testTaint)
+			e2enode.AddOrUpdateTaintOnNode(cs, nodeName2, testTaint)
 			framework.ExpectNodeHasTaint(cs, nodeName2, &testTaint)
-			defer framework.RemoveTaintOffNode(cs, nodeName2, testTaint)
+			defer e2enode.RemoveTaintOffNode(cs, nodeName2, testTaint)
 		}
 
 		// Wait a bit
@@ -412,13 +409,17 @@ var _ = SIGDescribe("NoExecuteTaintManager Multiple Pods [Serial]", func() {
 	})
 
 	/*
-		Release : v1.16
+		Release: v1.16
 		Testname: Pod Eviction, Toleration limits
 		Description: In a multi-pods scenario with tolerationSeconds, the pods MUST be evicted as per
 		the toleration time limit.
 	*/
 	framework.ConformanceIt("evicts pods with minTolerationSeconds [Disruptive]", func() {
 		podGroup := "taint-eviction-b"
+		observedDeletions := make(chan string, 100)
+		stopCh := make(chan struct{})
+		createTestController(cs, observedDeletions, stopCh, podGroup, ns)
+
 		// 1. Run two pods both with toleration; one with tolerationSeconds=5, the other with 25
 		pod1 := createPodForTaintsTest(true, additionalWaitPerDeleteSeconds, podGroup+"1", podGroup, ns)
 		pod2 := createPodForTaintsTest(true, 5*additionalWaitPerDeleteSeconds, podGroup+"2", podGroup, ns)
@@ -446,27 +447,25 @@ var _ = SIGDescribe("NoExecuteTaintManager Multiple Pods [Serial]", func() {
 		// 2. Taint the nodes running those pods with a no-execute taint
 		ginkgo.By("Trying to apply a taint on the Node")
 		testTaint := getTestTaint()
-		framework.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
+		e2enode.AddOrUpdateTaintOnNode(cs, nodeName, testTaint)
 		framework.ExpectNodeHasTaint(cs, nodeName, &testTaint)
-		defer framework.RemoveTaintOffNode(cs, nodeName, testTaint)
+		defer e2enode.RemoveTaintOffNode(cs, nodeName, testTaint)
 
-		wait.PollImmediate(1*time.Second, (kubeletPodDeletionDelaySeconds+14*additionalWaitPerDeleteSeconds)*time.Second, func() (bool, error) {
-			deleted := 0
-			for i := 1; i < 3; i++ {
-				_, err := cs.CoreV1().Pods(ns).Get(context.TODO(), fmt.Sprintf("%s%d", podGroup, i), metav1.GetOptions{})
-				if err == nil {
-					return false, nil
-				}
-				if apierrors.IsNotFound(err) {
-					deleted++
-				} else {
-					return false, err
-				}
+		// 3. Wait to see if both pods get evicted in between [5, 25] seconds
+		ginkgo.By("Waiting for Pod1 and Pod2 to be deleted")
+		// On Windows hosts, we're noticing that the pods are taking more time to get deleted, so having larger timeout
+		// is good
+		timeoutChannel := time.NewTimer(time.Duration(kubeletPodDeletionDelaySeconds+10*additionalWaitPerDeleteSeconds) * time.Second).C
+		var evicted int
+		for evicted != 2 {
+			select {
+			case <-timeoutChannel:
+				framework.Failf("Failed to evict all Pods. %d pod(s) is not evicted.", 2-evicted)
+				return
+			case podName := <-observedDeletions:
+				framework.Logf("Noticed Pod %q gets evicted.", podName)
+				evicted++
 			}
-			if deleted == 2 {
-				return true, nil
-			}
-			return false, nil
-		})
+		}
 	})
 })

@@ -10,6 +10,7 @@ import (
 	networkclient "github.com/openshift/client-go/network/clientset/versioned/typed/network/v1"
 	"github.com/openshift/library-go/pkg/network/networkutils"
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
 
 	kapiv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,7 +30,7 @@ var _ = Describe("[sig-network] multicast", func() {
 	// plugins should implement multicast in the way that we test. For third-party
 	// plugins, the behavior is unspecified and we should not run either test.
 
-	InPluginContext([]string{networkutils.SingleTenantPluginName},
+	InopenshiftSDNModeContext([]string{networkutils.SingleTenantPluginName},
 		func() {
 			It("should block multicast traffic", func() {
 				oc := exutil.NewCLI("multicast")
@@ -39,7 +40,7 @@ var _ = Describe("[sig-network] multicast", func() {
 		},
 	)
 
-	InPluginContext([]string{networkutils.MultiTenantPluginName, networkutils.NetworkPolicyPluginName},
+	InopenshiftSDNModeContext([]string{networkutils.MultiTenantPluginName, networkutils.NetworkPolicyPluginName},
 		func() {
 			It("should block multicast traffic in namespaces where it is disabled", func() {
 				f := oc.KubeFramework()
@@ -167,7 +168,7 @@ func launchTestMulticastPod(f *e2e.Framework, nodeName string, podName string) e
 			Containers: []kapiv1.Container{
 				{
 					Name:    contName,
-					Image:   "openshift/test-multicast",
+					Image:   image.LocationFor("docker.io/openshift/test-multicast:latest"),
 					Command: []string{"sleep", "1000"},
 				},
 			},

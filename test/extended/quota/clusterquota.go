@@ -14,6 +14,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/kubernetes/test/e2e/framework"
 
 	imagev1 "github.com/openshift/api/image/v1"
 	quotav1 "github.com/openshift/api/quota/v1"
@@ -27,7 +28,7 @@ var _ = g.Describe("[sig-api-machinery][Feature:ClusterResourceQuota]", func() {
 
 	g.Describe("Cluster resource quota", func() {
 		g.It(fmt.Sprintf("should control resource limits across namespaces"), func() {
-			t := g.GinkgoT()
+			t := g.GinkgoT(1)
 
 			clusterAdminKubeClient := oc.AdminKubeClient()
 			clusterAdminQuotaClient := oc.AdminQuotaClient()
@@ -48,6 +49,23 @@ var _ = g.Describe("[sig-api-machinery][Feature:ClusterResourceQuota]", func() {
 					},
 				},
 			}
+
+			const kubeRootCAName = "kube-root-ca.crt"
+			framework.Logf("expecting ConfigMap %q to be present", kubeRootCAName)
+
+			const serviceCAName = "openshift-service-ca.crt"
+			framework.Logf("expecting ConfigMap %q to be present", serviceCAName)
+
+			// Each namespace is expected to have a configmap each for kube root ca and service ca
+			namespaceInitialCMCount := 2
+
+			// Ensure quota includes the 2 mandatory configmaps
+			// TODO(marun) Figure out why the added quantity isn't 2
+			mandatoryCMQuantity := resource.NewQuantity(int64(namespaceInitialCMCount)*2, resource.DecimalSI)
+			q := cq.Spec.Quota.Hard[corev1.ResourceConfigMaps]
+			q.Add(*mandatoryCMQuantity)
+			cq.Spec.Quota.Hard[corev1.ResourceConfigMaps] = q
+
 			if _, err := clusterAdminQuotaClient.QuotaV1().ClusterResourceQuotas().Create(context.Background(), cq, metav1.CreateOptions{}); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -55,6 +73,21 @@ var _ = g.Describe("[sig-api-machinery][Feature:ClusterResourceQuota]", func() {
 
 			firstProjectName := oc.CreateProject()
 			secondProjectName := oc.CreateProject()
+
+			// Wait for the creation of the mandatory configmaps before performing checks of quota
+			// enforcement to ensure reliable test execution.
+			for _, ns := range []string{firstProjectName, secondProjectName} {
+				for _, cm := range []string{kubeRootCAName, serviceCAName} {
+					_, err := exutil.WaitForCMState(context.Background(), oc.KubeClient().CoreV1(), ns, cm, func(cm *corev1.ConfigMap) (bool, error) {
+						// Any event means the CM is present
+						framework.Logf("configmap %q is present in namespace %q", cm, ns)
+						return true, nil
+					})
+					if err != nil {
+						t.Fatalf("unexpected error: %v", err)
+					}
+				}
+			}
 
 			if err := labelNamespace(clusterAdminKubeClient.CoreV1(), labelSelectorKey, firstProjectName); err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -83,12 +116,13 @@ var _ = g.Describe("[sig-api-machinery][Feature:ClusterResourceQuota]", func() {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if err := waitForQuotaStatus(clusterAdminQuotaClient, cq.Name, func(quota *quotav1.ClusterResourceQuota) error {
+				expectedCount := int64(2*namespaceInitialCMCount + 1)
 				q := quota.Status.Total.Used[corev1.ResourceConfigMaps]
 				if i, ok := q.AsInt64(); ok {
-					if i == 1 {
+					if i == expectedCount {
 						return nil
 					}
-					return fmt.Errorf("%d != 1", i)
+					return fmt.Errorf("%d != %d", i, expectedCount)
 				}
 				return fmt.Errorf("quota=%+v AsInt64() failed", q)
 			}); err != nil {
@@ -98,12 +132,13 @@ var _ = g.Describe("[sig-api-machinery][Feature:ClusterResourceQuota]", func() {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if err := waitForQuotaStatus(clusterAdminQuotaClient, cq.Name, func(quota *quotav1.ClusterResourceQuota) error {
+				expectedCount := int64(2*namespaceInitialCMCount + 2)
 				q := quota.Status.Total.Used[corev1.ResourceConfigMaps]
 				if i, ok := q.AsInt64(); ok {
-					if i == 2 {
+					if i == expectedCount {
 						return nil
 					}
-					return fmt.Errorf("%d != 1", i)
+					return fmt.Errorf("%d != %d", i, expectedCount)
 				}
 				return fmt.Errorf("quota=%+v AsInt64() failed", q)
 			}); err != nil {

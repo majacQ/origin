@@ -12,7 +12,7 @@ package v1
 
 // AUTO-GENERATED FUNCTIONS START HERE
 var map_Config = map[string]string{
-	"": "Config is the configuration object for a registry instance managed by the registry operator",
+	"": "Config is the configuration object for a registry instance managed by the registry operator\n\nCompatibility level 1: Stable within a major release for a minimum of 12 months or 3 minor releases (whichever is longer).",
 }
 
 func (Config) SwaggerDoc() map[string]string {
@@ -20,7 +20,7 @@ func (Config) SwaggerDoc() map[string]string {
 }
 
 var map_ConfigList = map[string]string{
-	"": "ConfigList is a slice of Config objects.",
+	"": "ConfigList is a slice of Config objects.\n\nCompatibility level 1: Stable within a major release for a minimum of 12 months or 3 minor releases (whichever is longer).",
 }
 
 func (ConfigList) SwaggerDoc() map[string]string {
@@ -71,13 +71,15 @@ func (ImageRegistryConfigRoute) SwaggerDoc() map[string]string {
 }
 
 var map_ImageRegistryConfigStorage = map[string]string{
-	"":         "ImageRegistryConfigStorage describes how the storage should be configured for the image registry.",
-	"emptyDir": "emptyDir represents ephemeral storage on the pod's host node. WARNING: this storage cannot be used with more than 1 replica and is not suitable for production use. When the pod is removed from a node for any reason, the data in the emptyDir is deleted forever.",
-	"s3":       "s3 represents configuration that uses Amazon Simple Storage Service.",
-	"gcs":      "gcs represents configuration that uses Google Cloud Storage.",
-	"swift":    "swift represents configuration that uses OpenStack Object Storage.",
-	"pvc":      "pvc represents configuration that uses a PersistentVolumeClaim.",
-	"azure":    "azure represents configuration that uses Azure Blob Storage.",
+	"":                "ImageRegistryConfigStorage describes how the storage should be configured for the image registry.",
+	"emptyDir":        "emptyDir represents ephemeral storage on the pod's host node. WARNING: this storage cannot be used with more than 1 replica and is not suitable for production use. When the pod is removed from a node for any reason, the data in the emptyDir is deleted forever.",
+	"s3":              "s3 represents configuration that uses Amazon Simple Storage Service.",
+	"gcs":             "gcs represents configuration that uses Google Cloud Storage.",
+	"swift":           "swift represents configuration that uses OpenStack Object Storage.",
+	"pvc":             "pvc represents configuration that uses a PersistentVolumeClaim.",
+	"azure":           "azure represents configuration that uses Azure Blob Storage.",
+	"ibmcos":          "ibmcos represents configuration that uses IBM Cloud Object Storage.",
+	"managementState": "managementState indicates if the operator manages the underlying storage unit. If Managed the operator will remove the storage when this operator gets Removed.",
 }
 
 func (ImageRegistryConfigStorage) SwaggerDoc() map[string]string {
@@ -88,6 +90,7 @@ var map_ImageRegistryConfigStorageAzure = map[string]string{
 	"":            "ImageRegistryConfigStorageAzure holds the information to configure the registry to use Azure Blob Storage for backend storage.",
 	"accountName": "accountName defines the account to be used by the registry.",
 	"container":   "container defines Azure's container to be used by registry.",
+	"cloudName":   "cloudName is the name of the Azure cloud environment to be used by the registry. If empty, the operator will set it based on the infrastructure object.",
 }
 
 func (ImageRegistryConfigStorageAzure) SwaggerDoc() map[string]string {
@@ -112,6 +115,19 @@ var map_ImageRegistryConfigStorageGCS = map[string]string{
 
 func (ImageRegistryConfigStorageGCS) SwaggerDoc() map[string]string {
 	return map_ImageRegistryConfigStorageGCS
+}
+
+var map_ImageRegistryConfigStorageIBMCOS = map[string]string{
+	"":                   "ImageRegistryConfigStorageIBMCOS holds the information to configure the registry to use IBM Cloud Object Storage for backend storage.",
+	"bucket":             "bucket is the bucket name in which you want to store the registry's data. Optional, will be generated if not provided.",
+	"location":           "location is the IBM Cloud location in which your bucket exists. Optional, will be set based on the installed IBM Cloud location.",
+	"resourceGroupName":  "resourceGroupName is the name of the IBM Cloud resource group that this bucket and its service instance is associated with. Optional, will be set based on the installed IBM Cloud resource group.",
+	"resourceKeyCRN":     "resourceKeyCRN is the CRN of the IBM Cloud resource key that is created for the service instance. Commonly referred as a service credential and must contain HMAC type credentials. Optional, will be computed if not provided.",
+	"serviceInstanceCRN": "serviceInstanceCRN is the CRN of the IBM Cloud Object Storage service instance that this bucket is associated with. Optional, will be computed if not provided.",
+}
+
+func (ImageRegistryConfigStorageIBMCOS) SwaggerDoc() map[string]string {
+	return map_ImageRegistryConfigStorageIBMCOS
 }
 
 var map_ImageRegistryConfigStoragePVC = map[string]string{
@@ -178,7 +194,7 @@ var map_ImageRegistrySpec = map[string]string{
 	"defaultRoute":    "defaultRoute indicates whether an external facing route for the registry should be created using the default generated hostname.",
 	"routes":          "routes defines additional external facing routes which should be created for the registry.",
 	"replicas":        "replicas determines the number of registry instances to run.",
-	"logging":         "logging determines the level of logging enabled in the registry.",
+	"logging":         "logging is deprecated, use logLevel instead.",
 	"resources":       "resources defines the resource requests+limits for the registry pod.",
 	"nodeSelector":    "nodeSelector defines the node selection constraints for the registry pod.",
 	"tolerations":     "tolerations defines the tolerations for the registry pod.",
@@ -192,7 +208,7 @@ func (ImageRegistrySpec) SwaggerDoc() map[string]string {
 
 var map_ImageRegistryStatus = map[string]string{
 	"":               "ImageRegistryStatus reports image registry operational status.",
-	"storageManaged": "storageManaged is a boolean which denotes whether or not we created the registry storage medium (such as an S3 bucket).",
+	"storageManaged": "storageManaged is deprecated, please refer to Storage.managementState",
 	"storage":        "storage indicates the current applied storage configuration of the registry.",
 }
 
@@ -201,7 +217,7 @@ func (ImageRegistryStatus) SwaggerDoc() map[string]string {
 }
 
 var map_ImagePruner = map[string]string{
-	"": "ImagePruner is the configuration object for an image registry pruner managed by the registry operator.",
+	"": "ImagePruner is the configuration object for an image registry pruner managed by the registry operator.\n\nCompatibility level 1: Stable within a major release for a minimum of 12 months or 3 minor releases (whichever is longer).",
 }
 
 func (ImagePruner) SwaggerDoc() map[string]string {
@@ -209,7 +225,7 @@ func (ImagePruner) SwaggerDoc() map[string]string {
 }
 
 var map_ImagePrunerList = map[string]string{
-	"": "ImagePrunerList is a slice of ImagePruner objects.",
+	"": "ImagePrunerList is a slice of ImagePruner objects.\n\nCompatibility level 1: Stable within a major release for a minimum of 12 months or 3 minor releases (whichever is longer).",
 }
 
 func (ImagePrunerList) SwaggerDoc() map[string]string {
@@ -217,17 +233,20 @@ func (ImagePrunerList) SwaggerDoc() map[string]string {
 }
 
 var map_ImagePrunerSpec = map[string]string{
-	"":                           "ImagePrunerSpec defines the specs for the running image pruner.",
-	"schedule":                   "schedule specifies when to execute the job using standard cronjob syntax: https://wikipedia.org/wiki/Cron. Defaults to `0 0 * * *`.",
-	"suspend":                    "suspend specifies whether or not to suspend subsequent executions of this cronjob. Defaults to false.",
-	"keepTagRevisions":           "keepTagRevisions specifies the number of image revisions for a tag in an image stream that will be preserved. Defaults to 5.",
-	"keepYoungerThan":            "keepYoungerThan specifies the minimum age of an image and its referrers for it to be considered a candidate for pruning. Defaults to 96h (96 hours).",
-	"resources":                  "resources defines the resource requests and limits for the image pruner pod.",
-	"affinity":                   "affinity is a group of node affinity scheduling rules for the image pruner pod.",
-	"nodeSelector":               "nodeSelector defines the node selection constraints for the image pruner pod.",
-	"tolerations":                "tolerations defines the node tolerations for the image pruner pod.",
-	"successfulJobsHistoryLimit": "successfulJobsHistoryLimit specifies how many successful image pruner jobs to retain. Defaults to 3 if not set.",
-	"failedJobsHistoryLimit":     "failedJobsHistoryLimit specifies how many failed image pruner jobs to retain. Defaults to 3 if not set.",
+	"":                             "ImagePrunerSpec defines the specs for the running image pruner.",
+	"schedule":                     "schedule specifies when to execute the job using standard cronjob syntax: https://wikipedia.org/wiki/Cron. Defaults to `0 0 * * *`.",
+	"suspend":                      "suspend specifies whether or not to suspend subsequent executions of this cronjob. Defaults to false.",
+	"keepTagRevisions":             "keepTagRevisions specifies the number of image revisions for a tag in an image stream that will be preserved. Defaults to 3.",
+	"keepYoungerThan":              "keepYoungerThan specifies the minimum age in nanoseconds of an image and its referrers for it to be considered a candidate for pruning. DEPRECATED: This field is deprecated in favor of keepYoungerThanDuration. If both are set, this field is ignored and keepYoungerThanDuration takes precedence.",
+	"keepYoungerThanDuration":      "keepYoungerThanDuration specifies the minimum age of an image and its referrers for it to be considered a candidate for pruning. Defaults to 60m (60 minutes).",
+	"resources":                    "resources defines the resource requests and limits for the image pruner pod.",
+	"affinity":                     "affinity is a group of node affinity scheduling rules for the image pruner pod.",
+	"nodeSelector":                 "nodeSelector defines the node selection constraints for the image pruner pod.",
+	"tolerations":                  "tolerations defines the node tolerations for the image pruner pod.",
+	"successfulJobsHistoryLimit":   "successfulJobsHistoryLimit specifies how many successful image pruner jobs to retain. Defaults to 3 if not set.",
+	"failedJobsHistoryLimit":       "failedJobsHistoryLimit specifies how many failed image pruner jobs to retain. Defaults to 3 if not set.",
+	"ignoreInvalidImageReferences": "ignoreInvalidImageReferences indicates whether the pruner can ignore errors while parsing image references.",
+	"logLevel":                     "logLevel sets the level of log output for the pruner job.\n\nValid values are: \"Normal\", \"Debug\", \"Trace\", \"TraceAll\". Defaults to \"Normal\".",
 }
 
 func (ImagePrunerSpec) SwaggerDoc() map[string]string {

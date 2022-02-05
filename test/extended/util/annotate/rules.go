@@ -1,9 +1,17 @@
 package main
 
-import (
-	// ensure all the ginkgo tests are loaded
-	_ "github.com/openshift/origin/test/extended"
-)
+// Rules defined here are additive to the rules already defined for
+// kube e2e tests in openshift/kubernetes. The kube rules are
+// vendored via the following file:
+//
+//   vendor/k8s.io/kubernetes/openshift-hack/e2e/annotate/rules.go
+//
+// Rules that are needed to pass the upstream e2e test suite in a
+// "default OCP CI" configuration (eg, AWS or GCP, openshift-sdn) must
+// be added to openshift/kubernetes to allow CI to pass there, and
+// then vendored back into origin. Rules that only apply to
+// "non-default" configurations (other clouds, other network
+// providers) should be added here.
 
 var (
 	testMaps = map[string][]string{
@@ -13,184 +21,229 @@ var (
 			`\[Feature:ImagePrune\]`,
 		},
 		// alpha features that are not gated
-		"[Disabled:Alpha]": {
-			`\[Feature:Initializers\]`,     // admission controller disabled
-			`\[Feature:TTLAfterFinished\]`, // flag gate is off
-			`\[Feature:GPUDevicePlugin\]`,  // GPU node needs to be available
-			`\[sig-scheduling\] GPUDevicePluginAcrossRecreate \[Feature:Recreate\]`, // GPU node needs to be available
-			`\[Feature:ExpandCSIVolumes\]`,                                          // off by default .  sig-storage
-			`\[Feature:DynamicAudit\]`,                                              // off by default.  sig-master
-
-			`\[NodeAlphaFeature:VolumeSubpathEnvExpansion\]`, // flag gate is off
-			`\[Feature:IPv6DualStack.*\]`,
-			`\[Feature:ImmutableEphemeralVolume\]`,      // flag gate is off
-			`\[Feature:ServiceAccountIssuerDiscovery\]`, // flag gate is off
-		},
+		"[Disabled:Alpha]": {},
 		// tests for features that are not implemented in openshift
-		"[Disabled:Unimplemented]": {
-			`\[Feature:Networking-IPv6\]`,     // openshift-sdn doesn't support yet
-			`Monitoring`,                      // Not installed, should be
-			`Cluster level logging`,           // Not installed yet
-			`Kibana`,                          // Not installed
-			`Ubernetes`,                       // Can't set zone labels today
-			`kube-ui`,                         // Not installed by default
-			`Kubernetes Dashboard`,            // Not installed by default (also probably slow image pull)
-			`\[Feature:ServiceLoadBalancer\]`, // Not enabled yet
-			`\[Feature:RuntimeClass\]`,        // disable runtimeclass tests in 4.1 (sig-pod/sjenning@redhat.com)
-
-			`NetworkPolicy.*egress`,     // not supported
-			`NetworkPolicy.*named port`, // not yet implemented
-			`enforce egress policy`,     // not support
-			`should proxy to cadvisor`,  // we don't expose cAdvisor port directly for security reasons
-		},
+		"[Disabled:Unimplemented]": {},
 		// tests that rely on special configuration that we do not yet support
-		"[Disabled:SpecialConfig]": {
-			`\[Feature:ImageQuota\]`,                    // Quota isn't turned on by default, we should do that and then reenable these tests
-			`\[Feature:Audit\]`,                         // Needs special configuration
-			`\[Feature:LocalStorageCapacityIsolation\]`, // relies on a separate daemonset?
-			`\[sig-cloud-provider-gcp\]`,                // these test require a different configuration - note that GCE tests from the sig-cluster-lifecycle were moved to the sig-cloud-provider-gcpcluster lifecycle see https://github.com/kubernetes/kubernetes/commit/0b3d50b6dccdc4bbd0b3e411c648b092477d79ac#diff-3b1910d08fb8fd8b32956b5e264f87cb
-			`\[Feature:StatefulUpgrade\]`,               // related to cluster lifecycle (in e2e/lifecycle package) and requires an upgrade hook we don't use
-
-			`kube-dns-autoscaler`, // Don't run kube-dns
-			`should check if Kubernetes master services is included in cluster-info`, // Don't run kube-dns
-			`DNS configMap`, // this tests dns federation configuration via configmap, which we don't support yet
-
-			`authentication: OpenLDAP`,              // needs separate setup and bucketing for openldap bootstrapping
-			`NodeProblemDetector`,                   // requires a non-master node to run on
-			`Advanced Audit should audit API calls`, // expects to be able to call /logs
-
-			`Firewall rule should have correct firewall rules for e2e cluster`, // Upstream-install specific
-		},
+		"[Disabled:SpecialConfig]": {},
+		// tests that rely on special configuration that we do not yet support
 		// tests that are known broken and need to be fixed upstream or in openshift
 		// always add an issue here
 		"[Disabled:Broken]": {
-			`mount an API token into pods`,                                // We add 6 secrets, not 1
-			`ServiceAccounts should ensure a single API token exists`,     // We create lots of secrets
-			`unchanging, static URL paths for kubernetes api services`,    // the test needs to exclude URLs that are not part of conformance (/logs)
-			`Services should be able to up and down services`,             // we don't have wget installed on nodes
-			`Network should set TCP CLOSE_WAIT timeout`,                   // possibly some difference between ubuntu and fedora
-			`\[NodeFeature:Sysctls\]`,                                     // needs SCC support
-			`should check kube-proxy urls`,                                // previously this test was skipped b/c we reported -1 as the number of nodes, now we report proper number and test fails
-			`SSH`,                                                         // TRIAGE
-			`should implement service.kubernetes.io/service-proxy-name`,   // this is an optional test that requires SSH. sig-network
 			`should idle the service and DeploymentConfig properly`,       // idling with a single service and DeploymentConfig
 			`should answer endpoint and wildcard queries for the cluster`, // currently not supported by dns operator https://github.com/openshift/cluster-dns-operator/issues/43
-			`should allow ingress access on one named port`,               // https://bugzilla.redhat.com/show_bug.cgi?id=1711602
-			`recreate nodes and ensure they function upon restart`,        // https://bugzilla.redhat.com/show_bug.cgi?id=1756428
-			`\[Driver: iscsi\]`,                                           // https://bugzilla.redhat.com/show_bug.cgi?id=1711627
 
-			"RuntimeClass should reject",
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1988272
+			`\[sig-network\] Networking should provide Internet connection for containers \[Feature:Networking-IPv6\]`,
+			`\[sig-network\] Networking should provider Internet connection for containers using DNS`,
 
-			`Services should implement service.kubernetes.io/headless`,       // requires SSH access to function, needs to be refactored
-			`ClusterDns \[Feature:Example\] should create pod that uses dns`, // doesn't use bindata, not part of kube test binary
-			`Simple pod should handle in-cluster config`,                     // kubectl cp doesn't work or is not preserving executable bit, we have this test already
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1908645
+			`\[sig-network\] Networking Granular Checks: Services should function for service endpoints using hostNetwork`,
+			`\[sig-network\] Networking Granular Checks: Services should function for pod-Service\(hostNetwork\)`,
 
-			// TODO(node): configure the cri handler for the runtime class to make this work
-			"should run a Pod requesting a RuntimeClass with a configured handler",
-			"should reject a Pod requesting a RuntimeClass with conflicting node selector",
-			"should run a Pod requesting a RuntimeClass with scheduling",
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1952460
+			`\[sig-network\] Firewall rule control plane should not expose well-known ports`,
 
-			// A fix is in progress: https://github.com/openshift/origin/pull/24709
-			`Multi-AZ Clusters should spread the pods of a replication controller across zones`,
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1952457
+			`\[sig-node\] crictl should be able to run crictl on the node`,
 
-			`Cluster should restore itself after quorum loss`, // https://bugzilla.redhat.com/show_bug.cgi?id=1837157
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1945091
+			`\[Feature:GenericEphemeralVolume\]`,
+
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1953478
+			`\[sig-storage\] Dynamic Provisioning Invalid AWS KMS key should report an error and create no PV`,
+
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1957894
+			`\[sig-node\] Container Runtime blackbox test when running a container with a new image should be able to pull from private registry with secret`,
+
+			// The new NetworkPolicy test suite is extremely resource
+			// intensive and causes itself and other concurrently-running
+			// tests to be flaky.
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1980141
+			`\[sig-network\] Netpol `,
+
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1996128
+			`\[sig-network\] \[Feature:IPv6DualStack\] should have ipv4 and ipv6 node podCIDRs`,
 		},
 		// tests that may work, but we don't support them
-		"[Disabled:Unsupported]": {
-			`\[Driver: rbd\]`,  // OpenShift 4.x does not support Ceph RBD (use CSI instead)
-			`\[Driver: ceph\]`, // OpenShift 4.x does not support CephFS (use CSI instead)
-		},
+		"[Disabled:Unsupported]": {},
 		// tests too slow to be part of conformance
-		"[Slow]": {
-			`\[sig-scalability\]`,                          // disable from the default set for now
-			`should create and stop a working application`, // Inordinately slow tests
-
-			`\[Feature:PerformanceDNS\]`, // very slow
-
-			`should ensure that critical pod is scheduled in case there is no resources available`, // should be tagged disruptive, consumes 100% of cluster CPU
-
-			`validates that there exists conflict between pods with same hostPort and protocol but one using 0\.0\.0\.0 hostIP`, // 5m, really?
-		},
+		"[Slow]": {},
 		// tests that are known flaky
 		"[Flaky]": {
-			`Job should run a job to completion when tasks sometimes fail and are not locally restarted`, // seems flaky, also may require too many resources
-			`openshift mongodb replication creating from a template`,                                     // flaking on deployment
-
-			// TODO(node): test works when run alone, but not in the suite in CI
-			`\[Feature:HPA\] Horizontal pod autoscaling \(scale resource: CPU\) \[sig-autoscaling\] ReplicationController light Should scale from 1 pod to 2 pods`,
+			`openshift mongodb replication creating from a template`, // flaking on deployment
 		},
 		// tests that must be run without competition
-		"[Serial]": {
-			`\[Disruptive\]`,
-			`\[Feature:Performance\]`,            // requires isolation
-			`\[Feature:ManualPerformance\]`,      // requires isolation
-			`\[Feature:HighDensityPerformance\]`, // requires no other namespaces
+		"[Serial]":        {},
+		"[Skipped:azure]": {},
+		"[Skipped:ovirt]": {},
+		"[Skipped:gce]":   {},
 
-			`Service endpoints latency`, // requires low latency
-			`Clean up pods on node`,     // schedules up to max pods per node
-			`should allow starting 95 pods per node`,
-			`DynamicProvisioner should test that deleting a claim before the volume is provisioned deletes the volume`, // test is very disruptive to other tests
+		// These tests are skipped when openshift-tests needs to use a proxy to reach the
+		// cluster -- either because the test won't work while proxied, or because the test
+		// itself is testing a functionality using it's own proxy.
+		"[Skipped:Proxy]": {
+			// These tests setup their own proxy, which won't work when we need to access the
+			// cluster through a proxy.
+			`\[sig-cli\] Kubectl client Simple pod should support exec through an HTTP proxy`,
+			`\[sig-cli\] Kubectl client Simple pod should support exec through kubectl proxy`,
 
-			`Multi-AZ Clusters should spread the pods of a service across zones`, // spreading is a priority, not a predicate, and if the node is temporarily full the priority will be ignored
+			// Kube currently uses the x/net/websockets pkg, which doesn't work with proxies.
+			// See: https://github.com/kubernetes/kubernetes/pull/103595
+			`\[sig-node\] Pods should support retrieving logs from the container over websockets`,
+			`\[sig-cli\] Kubectl Port forwarding With a server listening on localhost should support forwarding over websockets`,
+			`\[sig-cli\] Kubectl Port forwarding With a server listening on 0.0.0.0 should support forwarding over websockets`,
+			`\[sig-node\] Pods should support remote command execution over websockets`,
 
-			`Should be able to support the 1\.7 Sample API Server using the current Aggregator`, // down apiservices break other clients today https://bugzilla.redhat.com/show_bug.cgi?id=1623195
-
-			`\[Feature:HPA\] Horizontal pod autoscaling \(scale resource: CPU\) \[sig-autoscaling\] ReplicationController light Should scale from 1 pod to 2 pods`,
-
-			`should prevent Ingress creation if more than 1 IngressClass marked as default`, // https://bugzilla.redhat.com/show_bug.cgi?id=1822286
-
-			`\[sig-network\] IngressClass \[Feature:Ingress\] should set default value on new IngressClass`, //https://bugzilla.redhat.com/show_bug.cgi?id=1833583
+			// These tests are flacky and require internet access
+			// See https://bugzilla.redhat.com/show_bug.cgi?id=2019375
+			`\[sig-builds\]\[Feature:Builds\] build can reference a cluster service with a build being created from new-build should be able to run a build that references a cluster service`,
+			`\[sig-builds\]\[Feature:Builds\] oc new-app should succeed with a --name of 58 characters`,
+			`\[sig-network\] DNS should resolve DNS of partial qualified names for services`,
+			`\[sig-arch\] Only known images used by tests`,
+			`\[sig-network\] DNS should provide DNS for the cluster`,
 		},
-		"[Skipped:azure]": {
-			"Networking should provide Internet connection for containers", // Azure does not allow ICMP traffic to internet.
-
-			// openshift-tests cannot access Azure API to create in-line or pre-provisioned volumes, https://bugzilla.redhat.com/show_bug.cgi?id=1723603
-			`\[sig-storage\] In-tree Volumes \[Driver: azure\] \[Testpattern: Inline-volume`,
-			`\[sig-storage\] In-tree Volumes \[Driver: azure\] \[Testpattern: Pre-provisioned PV`,
+		"[Skipped:SingleReplicaTopology]": {
+			`\[sig-apps\] Daemon set \[Serial\] should rollback without unnecessary restarts \[Conformance\]`,
+			`\[sig-node\] NoExecuteTaintManager Single Pod \[Serial\] doesn't evict pod with tolerations from tainted nodes`,
+			`\[sig-node\] NoExecuteTaintManager Single Pod \[Serial\] eventually evict pod with finite tolerations from tainted nodes`,
+			`\[sig-node\] NoExecuteTaintManager Single Pod \[Serial\] evicts pods from tainted nodes`,
+			`\[sig-node\] NoExecuteTaintManager Single Pod \[Serial\] removing taint cancels eviction \[Disruptive\] \[Conformance\]`,
+			`\[sig-node\] NoExecuteTaintManager Multiple Pods \[Serial\] evicts pods with minTolerationSeconds \[Disruptive\] \[Conformance\]`,
+			`\[sig-node\] NoExecuteTaintManager Multiple Pods \[Serial\] only evicts pods without tolerations from tainted nodes`,
+			`\[sig-cli\] Kubectl client Kubectl taint \[Serial\] should remove all the taints with the same key off a node`,
 		},
-		"[Skipped:ovirt]": {
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1838751
-			`\[sig-network\] Networking Granular Checks: Services should function for endpoint-Service`,
-			`\[sig-network\] Networking Granular Checks: Services should function for node-Service`,
-			`\[sig-network\] Networking Granular Checks: Services should function for pod-Service`,
+
+		// Tests that don't pass on disconnected, either due to requiring
+		// internet access for GitHub (e.g. many of the s2i builds), or
+		// because of pullthrough not supporting ICSP (https://bugzilla.redhat.com/show_bug.cgi?id=1918376)
+		"[Skipped:Disconnected]": {
+			// Internet access required
+			`\[sig-builds\]\[Feature:Builds\] clone repository using git:// protocol  should clone using git:// if no proxy is configured`,
+			`\[sig-builds\]\[Feature:Builds\] result image should have proper labels set  S2I build from a template should create a image from "test-s2i-build.json" template with proper Docker labels`,
+			`\[sig-builds\]\[Feature:Builds\] s2i build with a quota  Building from a template should create an s2i build with a quota and run it`,
+			`\[sig-builds\]\[Feature:Builds\] s2i build with a root user image should create a root build and pass with a privileged SCC`,
+			`\[sig-builds\]\[Feature:Builds\]\[timing\] capture build stages and durations  should record build stages and durations for docker`,
+			`\[sig-builds\]\[Feature:Builds\]\[timing\] capture build stages and durations  should record build stages and durations for s2i`,
+			`\[sig-builds\]\[Feature:Builds\]\[valueFrom\] process valueFrom in build strategy environment variables  should successfully resolve valueFrom in s2i build environment variables`,
+			`\[sig-builds\]\[Feature:Builds\]\[volumes\] should mount given secrets and configmaps into the build pod for source strategy builds`,
+			`\[sig-builds\]\[Feature:Builds\]\[volumes\] should mount given secrets and configmaps into the build pod for docker strategy builds`,
+			`\[sig-cli\] oc debug ensure it works with image streams`,
+			`\[sig-cli\] oc builds complex build start-build`,
+			`\[sig-cli\] oc builds complex build webhooks CRUD`,
+			`\[sig-cli\] oc builds new-build`,
+			`\[sig-devex\] check registry.redhat.io is available and samples operator can import sample imagestreams run sample related validations`,
+			`\[sig-devex\]\[Feature:Templates\] templateinstance readiness test  should report failed soon after an annotated objects has failed`,
+			`\[sig-devex\]\[Feature:Templates\] templateinstance readiness test  should report ready soon after all annotated objects are ready`,
+			`\[sig-operator\] an end user can use OLM can subscribe to the operator`,
+			`\[sig-network\] Networking should provide Internet connection for containers`,
+
+			// Need to access non-cached images like ruby and mongodb
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with multiple image change triggers should run a successful deployment with a trigger used by different containers`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with multiple image change triggers should run a successful deployment with multiple triggers`,
+
+			// ICSP
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs  should adhere to Three Laws of Controllers`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs adoption will orphan all RCs and adopt them back when recreated`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs generation should deploy based on a status version bump`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs keep the deployer pod invariant valid should deal with cancellation after deployer pod succeeded`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs paused should disable actions on deployments`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs rolled back should rollback to an older deployment`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs should respect image stream tag reference policy resolve the image pull spec`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs viewing rollout history should print the rollout history`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs when changing image change trigger should successfully trigger from an updated image`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs when run iteratively should only deploy the last deployment`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs when tagging images should successfully tag the deployed image`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with custom deployments should run the custom deployment steps`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with enhanced status should include various info in status`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with env in params referencing the configmap should expand the config map key to a value`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with failing hook should get all logs from retried hooks`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with minimum ready seconds set should not transition the deployment to Complete before satisfied`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with revision history limits should never persist more old deployments than acceptable after being observed by the controller`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs with test deployments should run a deployment to completion and then scale to zero`,
+			`\[sig-apps\]\[Feature:DeploymentConfig\] deploymentconfigs won't deploy RC with unresolved images when patched with empty image`,
+			`\[sig-apps\]\[Feature:Jobs\] Users should be able to create and run a job in a user project`,
+			`\[sig-arch\] Managed cluster should should expose cluster services outside the cluster`,
+			`\[sig-arch\]\[Early\] Managed cluster should start all core operators`,
+			`\[sig-auth\]\[Feature:SecurityContextConstraints\]  TestPodDefaultCapabilities`,
+			`\[sig-builds\]\[Feature:Builds\] Multi-stage image builds should succeed`,
+			`\[sig-builds\]\[Feature:Builds\] Optimized image builds  should succeed`,
+			`\[sig-builds\]\[Feature:Builds\] build can reference a cluster service  with a build being created from new-build should be able to run a build that references a cluster service`,
+			`\[sig-builds\]\[Feature:Builds\] build have source revision metadata  started build should contain source revision information`,
+			`\[sig-builds\]\[Feature:Builds\] build with empty source  started build should build even with an empty source in build config`,
+			`\[sig-builds\]\[Feature:Builds\] build without output image  building from templates should create an image from a S2i template without an output image reference defined`,
+			`\[sig-builds\]\[Feature:Builds\] build without output image  building from templates should create an image from a docker template without an output image reference defined`,
+			`\[sig-builds\]\[Feature:Builds\] custom build with buildah  being created from new-build should complete build with custom builder image`,
+			`\[sig-builds\]\[Feature:Builds\] imagechangetriggers  imagechangetriggers should trigger builds of all types`,
+			`\[sig-builds\]\[Feature:Builds\] oc new-app  should fail with a --name longer than 58 characters`,
+			`\[sig-builds\]\[Feature:Builds\] oc new-app  should succeed with a --name of 58 characters`,
+			`\[sig-builds\]\[Feature:Builds\] oc new-app  should succeed with an imagestream`,
+			`\[sig-builds\]\[Feature:Builds\] prune builds based on settings in the buildconfig  buildconfigs should have a default history limit set when created via the group api`,
+			`\[sig-builds\]\[Feature:Builds\] prune builds based on settings in the buildconfig  should prune builds after a buildConfig change`,
+			`\[sig-builds\]\[Feature:Builds\] prune builds based on settings in the buildconfig  should prune canceled builds based on the failedBuildsHistoryLimit setting`,
+			`\[sig-builds\]\[Feature:Builds\] prune builds based on settings in the buildconfig  should prune completed builds based on the successfulBuildsHistoryLimit setting`,
+			`\[sig-builds\]\[Feature:Builds\] prune builds based on settings in the buildconfig  should prune errored builds based on the failedBuildsHistoryLimit setting`,
+			`\[sig-builds\]\[Feature:Builds\] prune builds based on settings in the buildconfig  should prune failed builds based on the failedBuildsHistoryLimit setting`,
+			`\[sig-builds\]\[Feature:Builds\] result image should have proper labels set  Docker build from a template should create a image from "test-docker-build.json" template with proper Docker labels`,
+			`\[sig-builds\]\[Feature:Builds\] verify /run filesystem contents  are writeable using a simple Docker Strategy Build`,
+			`\[sig-builds\]\[Feature:Builds\] verify /run filesystem contents  do not have unexpected content using a simple Docker Strategy Build`,
+			`\[sig-builds\]\[Feature:Builds\]\[pullsecret\] docker build using a pull secret  Building from a template should create a docker build that pulls using a secret run it`,
+			`\[sig-builds\]\[Feature:Builds\]\[valueFrom\] process valueFrom in build strategy environment variables  should fail resolving unresolvable valueFrom in docker build environment variable references`,
+			`\[sig-builds\]\[Feature:Builds\]\[valueFrom\] process valueFrom in build strategy environment variables  should fail resolving unresolvable valueFrom in sti build environment variable references`,
+			`\[sig-builds\]\[Feature:Builds\]\[valueFrom\] process valueFrom in build strategy environment variables  should successfully resolve valueFrom in docker build environment variables`,
+			`\[sig-cli\] CLI can run inside of a busybox container`,
+			`\[sig-cli\] oc debug deployment configs from a build`,
+			`\[sig-cli\] oc rsh specific flags should work well when access to a remote shell`,
+			`\[sig-cli\] oc builds get buildconfig`,
+			`\[sig-cli\] oc builds patch buildconfig`,
+			`\[sig-cluster-lifecycle\] Pods cannot access the /config/master API endpoint`,
+			`\[sig-imageregistry\]\[Feature:ImageAppend\] Image append should create images by appending them`,
+			`\[sig-imageregistry\]\[Feature:ImageExtract\] Image extract should extract content from an image`,
+			`\[sig-imageregistry\]\[Feature:ImageInfo\] Image info should display information about images`,
+			`\[sig-imageregistry\]\[Feature:ImageLayers\] Image layer subresource should return layers from tagged images`,
+			`\[sig-imageregistry\]\[Feature:ImageTriggers\] Annotation trigger reconciles after the image is overwritten`,
+			`\[sig-imageregistry\]\[Feature:Image\] oc tag should change image reference for internal images`,
+			`\[sig-imageregistry\]\[Feature:Image\] oc tag should work when only imagestreams api is available`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should have a AlertmanagerReceiversNotConfigured alert in firing state`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should have important platform topology metrics`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should have non-Pod host cAdvisor metrics`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should provide ingress metrics`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should provide named network metrics`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should report telemetry if a cloud.openshift.com token is present \[Late\]`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster should start and expose a secured proxy and unsecured metrics`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster shouldn't have failing rules evaluation`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster shouldn't report any alerts in firing state apart from Watchdog and AlertmanagerReceiversNotConfigured \[Early\]`,
+			`\[sig-instrumentation\] Prometheus when installed on the cluster when using openshift-sdn should be able to get the sdn ovs flows`,
+			`\[sig-instrumentation\]\[Late\] Alerts should have a Watchdog alert in firing state the entire cluster run`,
+			`\[sig-instrumentation\]\[Late\] Alerts shouldn't exceed the 500 series limit of total series sent via telemetry from each cluster`,
+			`\[sig-instrumentation\]\[Late\] Alerts shouldn't report any alerts in firing or pending state apart from Watchdog and AlertmanagerReceiversNotConfigured and have no gaps in Watchdog firing`,
+			`\[sig-instrumentation\]\[sig-builds\]\[Feature:Builds\] Prometheus when installed on the cluster should start and expose a secured proxy and verify build metrics`,
+			`\[sig-network-edge\]\[Conformance\]\[Area:Networking\]\[Feature:Router\] The HAProxy router should be able to connect to a service that is idled because a GET on the route will unidle it`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should enable openshift-monitoring to pull metrics`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should expose a health check on the metrics port`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should expose prometheus metrics for a route`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should expose the profiling endpoints`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should override the route host for overridden domains with a custom value`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should override the route host with a custom value`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should respond with 503 to unrecognized hosts`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should run even if it has no access to update status`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should serve a route that points to two services and respect weights`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should serve routes that were created from an ingress`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should serve the correct routes when scoped to a single namespace and label set`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should set Forwarded headers appropriately`,
+			`\[sig-network\]\[Feature:Router\] The HAProxy router should support reencrypt to services backed by a serving certificate automatically`,
+			`\[sig-network\] Networking should provide Internet connection for containers \[Feature:Networking-IPv6\]`,
+			`\[sig-node\] Managed cluster should report ready nodes the entire duration of the test run`,
+			`\[sig-storage\]\[Late\] Metrics should report short attach times`,
+			`\[sig-storage\]\[Late\] Metrics should report short mount times`,
 		},
-		"[Skipped:gce]": {
-			// Requires creation of a different compute instance in a different zone and is not compatible with volumeBindingMode of WaitForFirstConsumer which we use in 4.x
-			`\[sig-scheduling\] Multi-AZ Cluster Volumes \[sig-storage\] should only be allowed to provision PDs in zones where nodes exist`,
 
-			// The following tests try to ssh directly to a node. None of our nodes have external IPs
-			`\[k8s.io\] \[sig-node\] crictl should be able to run crictl on the node`,
-			`\[sig-storage\] Flexvolumes should be mountable`,
-			`\[sig-storage\] Detaching volumes should not work when mount is in progress`,
+		// tests that don't pass under openshift-sdn NetworkPolicy mode are specified
+		// in the rules file in openshift/kubernetes, not here.
 
-			// We are using openshift-sdn to conceal metadata
-			`\[sig-auth\] Metadata Concealment should run a check-metadata-concealment job to completion`,
-
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1740959
-			`\[sig-api-machinery\] AdmissionWebhook Should be able to deny pod and configmap creation`,
-
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1745720
-			`\[sig-storage\] CSI Volumes \[Driver: pd.csi.storage.gke.io\]\[Serial\]`,
-
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1749882
-			`\[sig-storage\] CSI Volumes CSI Topology test using GCE PD driver \[Serial\]`,
-
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1751367
-			`gce-localssd-scsi-fs`,
-
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1750851
-			// should be serial if/when it's re-enabled
-			`\[HPA\] Horizontal pod autoscaling \(scale resource: Custom Metrics from Stackdriver\)`,
-		},
-		// tests that don't pass under openshift-sdn but that are expected to pass
-		// with other network plugins (particularly ovn-kubernetes)
-		"[Skipped:Network/OpenShiftSDN]": {
-			`NetworkPolicy between server and client should allow egress access on one named port`, // not yet implemented
-		},
 		// tests that don't pass under openshift-sdn multitenant mode
 		"[Skipped:Network/OpenShiftSDN/Multitenant]": {
 			`\[Feature:NetworkPolicy\]`, // not compatible with multitenant mode
-			`\[sig-network\] Services should preserve source pod IP for traffic thru service cluster IP`, // known bug, not planned to be fixed
 		},
 		// tests that don't pass under OVN Kubernetes
 		"[Skipped:Network/OVNKubernetes]": {
@@ -203,6 +256,20 @@ var (
 			`\[sig-network\] Services should have session affinity work for service with type clusterIP`,
 			`\[sig-network\] Services should have session affinity timeout work for NodePort service`,
 			`\[sig-network\] Services should have session affinity timeout work for service with type clusterIP`,
+
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1996097 - [Feature:IPv6DualStack] tests are failing in dualstack
+			// https://jira.coreos.com/browse/SDN-510: OVN-K doesn't support session affinity
+			`\[sig-network\] \[Feature:IPv6DualStack\] Granular Checks: Services Secondary IP Family \[LinuxOnly\] should function for client IP based session affinity: http`,
+			`\[sig-network\] \[Feature:IPv6DualStack\] Granular Checks: Services Secondary IP Family \[LinuxOnly\] should function for client IP based session affinity: udp`,
+
+			// ovn-kubernetes does not support named ports
+			`NetworkPolicy.*named port`,
+
+			// ovn-kubernetes does not support internal traffic policy
+			`\[Feature:ServiceInternalTrafficPolicy\]`,
+
+			// https://bugzilla.redhat.com/show_bug.cgi?id=1989169: unidling tests are flaky under ovn-kubernetes
+			`Unidling should work with TCP`,
 		},
 		"[Skipped:ibmcloud]": {
 			// skip Gluster tests (not supported on ROKS worker nodes)
@@ -224,11 +291,6 @@ var (
 			`\[sig-auth\] \[Feature:NodeAuthenticator\] The kubelet's main port 10250 should reject requests with no credentials`,
 			`\[sig-auth\] \[Feature:NodeAuthenticator\] The kubelet can delegate ServiceAccount tokens to the API server`,
 
-			// The cluster-network-operator creates the kube-proxy daemonset pods without mem/cpu requests,
-			// resulting in a qosClass of BestEffort
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1825019 - kube-proxy deployment does not include any memory/cpu requests
-			`\[Feature:Platform\] Managed cluster should ensure control plane pods do not run in best-effort QoS`,
-
 			// Calico is allowing the request to timeout instead of returning 'REFUSED'
 			// https://bugzilla.redhat.com/show_bug.cgi?id=1825021 - ROKS: calico SDN results in a request timeout when accessing services with no endpoints
 			`\[sig-network\] Services should be rejected when no endpoints exist`,
@@ -240,52 +302,9 @@ var (
 			// Currently ibm-master-proxy-static and imbcloud-block-storage-plugin tolerate all taints
 			// https://bugzilla.redhat.com/show_bug.cgi?id=1825027
 			`\[Feature:Platform\] Managed cluster should ensure control plane operators do not make themselves unevictable`,
-
-			// Prometheus is not reporting router metrics
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1825029
-			`\[Feature:Prometheus\]\[Conformance\] Prometheus when installed on the cluster should provide ingress metrics`,
-			`\[Conformance\]\[Area:Networking\]\[Feature:Router\] The HAProxy router should enable openshift-monitoring to pull metrics`,
-
-			// ROKS cluster role bindings don't match expected results
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1825030
-			`TestAuthorizationResourceAccessReview should succeed`,
-
-			// Test does not allow enough time for the pods to be created before deleting them
-			// https://bugzilla.redhat.com/show_bug.cgi?id=1825372
-			`Pod Container Status should never report success for a pending container`,
-		},
-		"[sig-node]": {
-			`\[NodeConformance\]`,
-			`NodeLease`,
-			`lease API`,
-			`\[NodeFeature`,
-			`\[NodeAlphaFeature`,
-			`Probing container`,
-			`Security Context When creating a`,
-			`Downward API should create a pod that prints his name and namespace`,
-			`Liveness liveness pods should be automatically restarted`,
-			`Secret should create a pod that reads a secret`,
-		},
-		"[sig-cluster-lifecycle]": {
-			`Feature:ClusterAutoscalerScalability`,
-			`recreate nodes and ensure they function`,
-		},
-		"[sig-arch]": {
-			// not run, assigned to arch as catch-all
-			`\[Feature:GKELocalSSD\]`,
-			`\[Feature:GKENodePool\]`,
 		},
 	}
 
 	// labelExcludes temporarily block tests out of a specific suite
 	labelExcludes = map[string][]string{}
-
-	excludedTests = []string{
-		`\[Disabled:`,
-		`\[Disruptive\]`,
-		`\[Skipped\]`,
-		`\[Slow\]`,
-		`\[Flaky\]`,
-		`\[Local\]`,
-	}
 )

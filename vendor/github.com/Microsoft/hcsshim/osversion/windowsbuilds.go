@@ -14,10 +14,25 @@ const (
 	RS3 = 16299
 
 	// RS4 (version 1803, codename "Redstone 4") corresponds to Windows Server
-	// 1809 (Semi-Annual Channel (SAC)), and Windows 10 (April 2018 Update).
+	// 1803 (Semi-Annual Channel (SAC)), and Windows 10 (April 2018 Update).
 	RS4 = 17134
 
 	// RS5 (version 1809, codename "Redstone 5") corresponds to Windows Server
 	// 2019 (ltsc2019), and Windows 10 (October 2018 Update).
 	RS5 = 17763
+
+	// V19H1 (version 1903) corresponds to Windows Server 1903 (semi-annual
+	// channel).
+	V19H1 = 18362
+
+	// V19H2 (version 1909) corresponds to Windows Server 1909 (semi-annual
+	// channel).
+	V19H2 = 18363
+
+	// V20H1 (version 2004) corresponds to Windows Server 2004 (semi-annual
+	// channel).
+	V20H1 = 19041
+
+	// V20H2 corresponds to Windows Server 20H2 (semi-annual channel).
+	V20H2 = 19042
 )

@@ -18,7 +18,7 @@ var _ = g.Describe("[sig-cli] oc rsh", func() {
 		podsLabel              = exutil.ParseLabelsOrDie("name=hello-centos")
 	)
 
-	g.Describe("rsh specific flags", func() {
+	g.Describe("specific flags", func() {
 		g.It("should work well when access to a remote shell", func() {
 			namespace := oc.Namespace()
 			g.By("Creating pods with multi containers")
@@ -32,7 +32,7 @@ var _ = g.Describe("[sig-cli] oc rsh", func() {
 			g.By("running the rsh command without specify container name")
 			out, err := oc.Run("rsh").Args(pods[0], "mkdir", "/tmp/test1").Output()
 			o.Expect(err).NotTo(o.HaveOccurred())
-			o.Expect(out).To(o.ContainSubstring("Defaulting container name to hello-centos"))
+			o.Expect(out).To(o.MatchRegexp(`Default.*container.*hello-centos`))
 
 			g.By("running the rsh command with specify container name and shell")
 			_, err = oc.Run("rsh").Args("--container=hello-centos-2", "--shell=/bin/sh", pods[0], "mkdir", "/tmp/test3").Output()

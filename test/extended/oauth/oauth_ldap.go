@@ -17,6 +17,7 @@ import (
 	osinv1 "github.com/openshift/api/osin/v1"
 	userv1client "github.com/openshift/client-go/user/clientset/versioned/typed/user/v1"
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
 	oauthutil "github.com/openshift/origin/test/extended/util/oauthserver"
 )
 
@@ -50,7 +51,7 @@ var _ = g.Describe("[sig-auth][Feature:LDAP] LDAP IDP", func() {
 		defer userv1client.NewForConfigOrDie(oc.AdminConfig()).Users().Delete(context.Background(), userName, metav1.DeleteOptions{})
 
 		g.By("setting up an OpenLDAP server")
-		ldapService, ldapCA, err := exutil.CreateLDAPTestServer(oc)
+		_, _, ldapService, ldapCA, err := exutil.CreateLDAPTestServer(oc)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("deploying an oauth server")
@@ -97,7 +98,7 @@ var _ = g.Describe("[sig-auth][Feature:LDAP] LDAP IDP", func() {
 
 		g.By("configuring LDAP users")
 		volumeMounts, volumes := exutil.LDAPClientMounts()
-		_, errs := exutil.RunOneShotCommandPod(oc, "oneshot-ldappasswd", exutil.OpenLDAPTestImage, fmt.Sprintf("ldappasswd -x -H ldap://%s -Z -D %s -w %s -s %s cn=%s,%s -vvv", ldapService, bindDN, bindPassword, goodPass, userName, searchDN), volumeMounts, volumes, nil, 5*time.Minute)
+		_, errs := exutil.RunOneShotCommandPod(oc, "oneshot-ldappasswd", image.OpenLDAPTestImage(), fmt.Sprintf("ldappasswd -x -H ldap://%s -Z -D %s -w %s -s %s cn=%s,%s -vvv", ldapService, bindDN, bindPassword, goodPass, userName, searchDN), volumeMounts, volumes, nil, 5*time.Minute)
 		o.Expect(errs).To(o.BeEmpty())
 
 		g.By("ensuring that you cannot authenticate with a bad password")

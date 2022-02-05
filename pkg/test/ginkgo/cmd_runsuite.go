@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"io/ioutil"
 	"os"
 	"os/signal"
@@ -14,9 +15,22 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/openshift/origin/pkg/monitor"
+	"github.com/openshift/origin/test/extended/testdata"
 
 	"github.com/onsi/ginkgo/config"
+	"github.com/openshift/origin/pkg/monitor"
+	"github.com/openshift/origin/pkg/monitor/monitorapi"
+	monitorserialization "github.com/openshift/origin/pkg/monitor/serialization"
+	"k8s.io/apimachinery/pkg/util/sets"
+)
+
+const (
+	// Dump pod displacements with at least 3 instances
+	minChainLen = 3
+
+	setupEvent       = "Setup"
+	upgradeEvent     = "Upgrade"
+	postUpgradeEvent = "PostUpgrade"
 )
 
 // Options is used to run a suite of tests by invoking each test
@@ -24,6 +38,7 @@ import (
 type Options struct {
 	Parallelism int
 	Count       int
+	FailFast    bool
 	Timeout     time.Duration
 	JUnitDir    string
 	TestFile    string
@@ -34,26 +49,29 @@ type Options struct {
 	// MatchFn if set is also used to filter the suite contents
 	MatchFn func(name string) bool
 
+	// SyntheticEventTests allows the caller to translate events or outside
+	// context into a failure.
+	SyntheticEventTests JUnitsForEvents
+
 	IncludeSuccessOutput bool
 
-	Provider     string
-	SuiteOptions string
-
-	Suites []*TestSuite
+	CommandEnv []string
 
 	DryRun        bool
 	PrintCommands bool
 	Out, ErrOut   io.Writer
+
+	StartTime time.Time
 }
 
 func (opt *Options) AsEnv() []string {
 	var args []string
-	args = append(args, fmt.Sprintf("TEST_PROVIDER=%s", opt.Provider))
-	args = append(args, fmt.Sprintf("TEST_SUITE_OPTIONS=%s", opt.SuiteOptions))
+	args = append(args, fmt.Sprintf("TEST_SUITE_START_TIME=%d", opt.StartTime.Unix()))
+	args = append(args, opt.CommandEnv...)
 	return args
 }
 
-func (opt *Options) Run(args []string) error {
+func (opt *Options) SelectSuite(suites []*TestSuite, args []string) (*TestSuite, error) {
 	var suite *TestSuite
 
 	if len(opt.TestFile) > 0 {
@@ -62,26 +80,26 @@ func (opt *Options) Run(args []string) error {
 		if opt.TestFile == "-" {
 			in, err = ioutil.ReadAll(os.Stdin)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		} else {
 			in, err = ioutil.ReadFile(opt.TestFile)
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		suite, err = newSuiteFromFile("files", in)
 		if err != nil {
-			return fmt.Errorf("could not read test suite from input: %v", err)
+			return nil, fmt.Errorf("could not read test suite from input: %v", err)
 		}
 	}
 
 	if suite == nil && len(args) == 0 {
-		fmt.Fprintf(opt.ErrOut, SuitesString(opt.Suites, "Select a test suite to run against the server:\n\n"))
-		return fmt.Errorf("specify a test suite to run, for example: %s run %s", filepath.Base(os.Args[0]), opt.Suites[0].Name)
+		fmt.Fprintf(opt.ErrOut, SuitesString(suites, "Select a test suite to run against the server:\n\n"))
+		return nil, fmt.Errorf("specify a test suite to run, for example: %s run %s", filepath.Base(os.Args[0]), suites[0].Name)
 	}
 	if suite == nil && len(args) > 0 {
-		for _, s := range opt.Suites {
+		for _, s := range suites {
 			if s.Name == args[0] {
 				suite = s
 				break
@@ -89,10 +107,13 @@ func (opt *Options) Run(args []string) error {
 		}
 	}
 	if suite == nil {
-		fmt.Fprintf(opt.ErrOut, SuitesString(opt.Suites, "Select a test suite to run against the server:\n\n"))
-		return fmt.Errorf("suite %q does not exist", args[0])
+		fmt.Fprintf(opt.ErrOut, SuitesString(suites, "Select a test suite to run against the server:\n\n"))
+		return nil, fmt.Errorf("suite %q does not exist", args[0])
 	}
+	return suite, nil
+}
 
+func (opt *Options) Run(suite *TestSuite) error {
 	if len(opt.Regex) > 0 {
 		if err := filterWithRegex(suite, opt.Regex); err != nil {
 			return err
@@ -103,6 +124,11 @@ func (opt *Options) Run(args []string) error {
 		suite.Matches = func(name string) bool {
 			return original(name) && opt.MatchFn(name)
 		}
+	}
+
+	syntheticEventTests := JUnitsForAllEvents{
+		opt.SyntheticEventTests,
+		suite.SyntheticEventTests,
 	}
 
 	tests, err := testsForSuite(config.GinkgoConfig)
@@ -135,17 +161,15 @@ func (opt *Options) Run(args []string) error {
 	if count == 0 {
 		count = suite.Count
 	}
-	if count > 1 {
-		var newTests []*testCase
-		for i := 0; i < count; i++ {
-			newTests = append(newTests, tests...)
-		}
-		tests = newTests
+
+	start := time.Now()
+	if opt.StartTime.IsZero() {
+		opt.StartTime = start
 	}
 
 	if opt.PrintCommands {
-		status := newTestStatus(opt.Out, true, len(tests), time.Minute, &monitor.Monitor{}, opt.AsEnv())
-		newParallelTestQueue(tests).Execute(context.Background(), 1, status.OutputCommand)
+		status := newTestStatus(opt.Out, true, len(tests), time.Minute, &monitor.Monitor{}, monitor.NewNoOpMonitor(), opt.AsEnv())
+		newParallelTestQueue().Execute(context.Background(), tests, 1, status.OutputCommand)
 		return nil
 	}
 	if opt.DryRun {
@@ -199,98 +223,202 @@ func (opt *Options) Run(args []string) error {
 	}()
 	signal.Notify(abortCh, syscall.SIGINT, syscall.SIGTERM)
 
-	m, err := monitor.Start(ctx)
+	restConfig, err := monitor.GetMonitorRESTConfig()
 	if err != nil {
 		return err
 	}
+	m, err := monitor.Start(ctx, restConfig)
+	if err != nil {
+		return err
+	}
+
+	pc, err := SetupNewPodCollector(ctx)
+	if err != nil {
+		return err
+	}
+
+	pc.SetEvents([]string{setupEvent})
+	pc.Run(ctx)
+
 	// if we run a single test, always include success output
 	includeSuccess := opt.IncludeSuccessOutput
-	if len(tests) == 1 {
+	if len(tests) == 1 && count == 1 {
 		includeSuccess = true
 	}
-	status := newTestStatus(opt.Out, includeSuccess, len(tests), timeout, m, opt.AsEnv())
 
-	early, normal := splitTests(tests, func(t *testCase) bool {
+	early, others := splitTests(tests, func(t *testCase) bool {
 		return strings.Contains(t.name, "[Early]")
 	})
 
-	late, normal := splitTests(normal, func(t *testCase) bool {
+	late, others := splitTests(others, func(t *testCase) bool {
 		return strings.Contains(t.name, "[Late]")
 	})
 
-	// run the tests
-	start := time.Now()
+	kubeTests, openshiftTests := splitTests(others, func(t *testCase) bool {
+		return strings.Contains(t.name, "[Suite:k8s]")
+	})
 
-	// run our Early tests first
-	q := newParallelTestQueue(early)
-	q.Execute(ctx, parallelism, status.Run)
+	// If user specifies a count, duplicate the kube and openshift tests that many times.
+	expectedTestCount := len(early) + len(late)
+	if count != -1 {
+		originalKube := kubeTests
+		originalOpenshift := openshiftTests
 
-	// run other tests next
-	q = newParallelTestQueue(normal)
-	q.Execute(ctx, parallelism, status.Run)
+		for i := 1; i < count; i++ {
+			kubeTests = append(kubeTests, copyTests(originalKube)...)
+			openshiftTests = append(openshiftTests, copyTests(originalOpenshift)...)
+		}
+	}
+	expectedTestCount += len(openshiftTests) + len(kubeTests)
 
-	duration := time.Now().Sub(start).Round(time.Second / 10)
+	status := newTestStatus(opt.Out, includeSuccess, expectedTestCount, timeout, m, m, opt.AsEnv())
+	testCtx := ctx
+	if opt.FailFast {
+		var cancelFn context.CancelFunc
+		testCtx, cancelFn = context.WithCancel(testCtx)
+		status.AfterTest(func(t *testCase) {
+			if t.failed {
+				cancelFn()
+			}
+		})
+	}
+
+	tests = nil
+
+	// run our Early tests
+	q := newParallelTestQueue()
+	q.Execute(testCtx, early, parallelism, status.Run)
+	tests = append(tests, early...)
+
+	// TODO: will move to the monitor
+	pc.SetEvents([]string{upgradeEvent})
+
+	// Run kube & openshift tests. If user specified a count of -1,
+	// we loop indefinitely.
+	for i := 0; (i < 1 || count == -1) && testCtx.Err() == nil; i++ {
+		kubeTestsCopy := copyTests(kubeTests)
+		q.Execute(testCtx, kubeTestsCopy, parallelism, status.Run)
+		tests = append(tests, kubeTestsCopy...)
+
+		openshiftTestsCopy := copyTests(openshiftTests)
+		q.Execute(testCtx, openshiftTestsCopy, parallelism, status.Run)
+		tests = append(tests, openshiftTestsCopy...)
+	}
+
+	// TODO: will move to the monitor
+	pc.SetEvents([]string{postUpgradeEvent})
+
+	// run Late test suits after everything else
+	q.Execute(testCtx, late, parallelism, status.Run)
+	tests = append(tests, late...)
+
+	// TODO: will move to the monitor
+	if len(opt.JUnitDir) > 0 {
+		pc.ComputePodTransitions()
+		data, err := pc.JsonDump()
+		if err != nil {
+			fmt.Fprintf(opt.ErrOut, "Unable to dump pod placement data: %v\n", err)
+		} else {
+			if err := ioutil.WriteFile(filepath.Join(opt.JUnitDir, "pod-placement-data.json"), data, 0644); err != nil {
+				fmt.Fprintf(opt.ErrOut, "Unable to write pod placement data: %v\n", err)
+			}
+		}
+		chains := pc.PodDisplacements().Dump(minChainLen)
+		if err := ioutil.WriteFile(filepath.Join(opt.JUnitDir, "pod-transitions.txt"), []byte(chains), 0644); err != nil {
+			fmt.Fprintf(opt.ErrOut, "Unable to write pod placement data: %v\n", err)
+		}
+	}
+
+	// calculate the effective test set we ran, excluding any incompletes
+	tests, _ = splitTests(tests, func(t *testCase) bool { return t.success || t.failed || t.skipped })
+
+	end := time.Now()
+	duration := end.Sub(start).Round(time.Second / 10)
 	if duration > time.Minute {
 		duration = duration.Round(time.Second)
 	}
 
-	// run Late test suits after everything else
-	q = newParallelTestQueue(late)
-	q.Execute(ctx, parallelism, status.Run)
-
 	pass, fail, skip, failing := summarizeTests(tests)
 
-	// monitor the cluster while the tests are running and report any detected
-	// anomalies
+	// monitor the cluster while the tests are running and report any detected anomalies
 	var syntheticTestResults []*JUnitTestCase
-	if events := m.Events(time.Time{}, time.Time{}); len(events) > 0 {
-		buf, errBuf := &bytes.Buffer{}, &bytes.Buffer{}
-		fmt.Fprintf(buf, "\nTimeline:\n\n")
-		errorCount := 0
-		for _, test := range tests {
-			if !test.failed {
-				continue
-			}
-			events = append(events,
-				&monitor.EventInterval{
-					From: test.start,
-					To:   test.end,
-					Condition: &monitor.Condition{
-						Level:   monitor.Info,
-						Locator: fmt.Sprintf("test=%q", test.name),
-						Message: "running",
-					},
-				},
-				&monitor.EventInterval{
-					From: test.end,
-					To:   test.end,
-					Condition: &monitor.Condition{
-						Level:   monitor.Info,
-						Locator: fmt.Sprintf("test=%q", test.name),
-						Message: "failed",
-					},
-				},
-			)
-		}
-		sort.Sort(events)
-		for _, event := range events {
-			if event.Level == monitor.Error {
-				errorCount++
-				fmt.Fprintln(errBuf, event.String())
-			}
-			fmt.Fprintln(buf, event.String())
-		}
-		fmt.Fprintln(buf)
+	var syntheticFailure bool
+	timeSuffix := fmt.Sprintf("_%s", start.UTC().Format("20060102-150405"))
+	events := m.Intervals(time.Time{}, time.Time{})
 
-		if errorCount > 0 {
-			syntheticTestResults = append(syntheticTestResults, &JUnitTestCase{
-				Name:      "Monitor cluster while tests execute",
-				SystemOut: buf.String(),
-				Duration:  duration.Seconds(),
-				FailureOutput: &FailureOutput{
-					Output: fmt.Sprintf("%d error level events were detected during this test run:\n\n%s", errorCount, errBuf.String()),
-				},
-			})
+	if len(opt.JUnitDir) > 0 {
+		var additionalEvents monitorapi.Intervals
+		filepath.WalkDir(opt.JUnitDir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if !strings.HasPrefix(d.Name(), "AdditionalEvents_") {
+				return nil
+			}
+			saved, _ := monitorserialization.EventsFromFile(path)
+			additionalEvents = append(additionalEvents, saved...)
+			return nil
+		})
+		if len(additionalEvents) > 0 {
+			events = append(events, additionalEvents.Cut(start, end)...)
+			sort.Sort(events)
+		}
+	}
+	events.Clamp(start, end)
+
+	if len(opt.JUnitDir) > 0 {
+		if err = monitorserialization.EventsToFile(filepath.Join(opt.JUnitDir, fmt.Sprintf("e2e-events%s.json", timeSuffix)), events); err != nil {
+			fmt.Fprintf(opt.ErrOut, "error: Failed to write event html: %v\n", err)
+		}
+		if err = monitorserialization.EventsIntervalsToFile(filepath.Join(opt.JUnitDir, fmt.Sprintf("e2e-intervals%s.json", timeSuffix)), events); err != nil {
+			fmt.Fprintf(opt.ErrOut, "error: Failed to write event html: %v\n", err)
+		}
+		if eventIntervalsJSON, err := monitorserialization.EventsIntervalsToJSON(events); err == nil {
+			e2eChartTemplate := testdata.MustAsset("e2echart/e2e-chart-template.html")
+			e2eChartHTML := bytes.ReplaceAll(e2eChartTemplate, []byte("EVENT_INTERVAL_JSON_GOES_HERE"), eventIntervalsJSON)
+			e2eChartHTMLPath := filepath.Join(opt.JUnitDir, fmt.Sprintf("e2e-intervals%s.html", timeSuffix))
+			if err := ioutil.WriteFile(e2eChartHTMLPath, e2eChartHTML, 0644); err != nil {
+				fmt.Fprintf(opt.ErrOut, "error: Failed to write event html: %v\n", err)
+			}
+		} else {
+			fmt.Fprintf(opt.ErrOut, "error: Failed to write event html: %v\n", err)
+		}
+	}
+
+	if len(events) > 0 {
+		var buf *bytes.Buffer
+		syntheticTestResults, buf, _ = createSyntheticTestsFromMonitor(events, duration)
+		testCases := syntheticEventTests.JUnitsForEvents(events, duration, restConfig)
+		syntheticTestResults = append(syntheticTestResults, testCases...)
+
+		if len(syntheticTestResults) > 0 {
+			// mark any failures by name
+			failing, flaky := sets.NewString(), sets.NewString()
+			for _, test := range syntheticTestResults {
+				if test.FailureOutput != nil {
+					failing.Insert(test.Name)
+				}
+			}
+			// if a test has both a pass and a failure, flag it
+			// as a flake
+			for _, test := range syntheticTestResults {
+				if test.FailureOutput == nil {
+					if failing.Has(test.Name) {
+						flaky.Insert(test.Name)
+					}
+				}
+			}
+			failing = failing.Difference(flaky)
+			if failing.Len() > 0 {
+				fmt.Fprintf(buf, "Failing invariants:\n\n%s\n\n", strings.Join(failing.List(), "\n"))
+				syntheticFailure = true
+			}
+			if flaky.Len() > 0 {
+				fmt.Fprintf(buf, "Flaky invariants:\n\n%s\n\n", strings.Join(flaky.List(), "\n"))
+			}
 		}
 
 		opt.Out.Write(buf.Bytes())
@@ -308,9 +436,9 @@ func (opt *Options) Run(args []string) error {
 			}
 		}
 
-		q := newParallelTestQueue(retries)
-		status := newTestStatus(ioutil.Discard, opt.IncludeSuccessOutput, len(retries), timeout, m, opt.AsEnv())
-		q.Execute(ctx, parallelism, status.Run)
+		q := newParallelTestQueue()
+		status := newTestStatus(ioutil.Discard, opt.IncludeSuccessOutput, len(retries), timeout, m, m, opt.AsEnv())
+		q.Execute(testCtx, retries, parallelism, status.Run)
 		var flaky []string
 		var repeatFailures []*testCase
 		for _, test := range retries {
@@ -327,9 +455,9 @@ func (opt *Options) Run(args []string) error {
 		}
 	}
 
+	// report the outcome of the test
 	if len(failing) > 0 {
-		names := testNames(failing)
-		sort.Strings(names)
+		names := sets.NewString(testNames(failing)...).List()
 		fmt.Fprintf(opt.Out, "Failing tests:\n\n%s\n\n", strings.Join(names, "\n"))
 	}
 
@@ -344,6 +472,10 @@ func (opt *Options) Run(args []string) error {
 			return fmt.Errorf("%d fail, %d pass, %d skip (%s)", fail, pass, skip, duration)
 		}
 		fmt.Fprintf(opt.Out, "%d flakes detected, suite allows passing with only flakes\n\n", fail)
+	}
+
+	if syntheticFailure {
+		return fmt.Errorf("failed because an invariant was violated, %d pass, %d skip (%s)\n", pass, skip, duration)
 	}
 
 	fmt.Fprintf(opt.Out, "%d pass, %d skip (%s)\n", pass, skip, duration)

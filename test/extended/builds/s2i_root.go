@@ -2,6 +2,7 @@ package builds
 
 import (
 	"context"
+	"fmt"
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
@@ -12,6 +13,7 @@ import (
 
 	buildv1 "github.com/openshift/api/build/v1"
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
 )
 
 func Before(oc *exutil.CLI) {
@@ -35,7 +37,8 @@ var _ = g.Describe("[sig-builds][Feature:Builds] s2i build with a root user imag
 		Before(oc)
 		defer After(oc)
 
-		err := oc.Run("new-app").Args("docker.io/openshift/test-build-roots2i~https://github.com/sclorg/nodejs-ex", "--name", "nodejsfail").Execute()
+		firstArgString := fmt.Sprintf("%s~https://github.com/sclorg/nodejs-ex", image.LocationFor("registry.ci.openshift.org/ocp/4.8:test-build-roots2i"))
+		err := oc.Run("new-app").Args(firstArgString, "--name", "nodejsfail").Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		err = exutil.WaitForABuild(oc.BuildClient().BuildV1().Builds(oc.Namespace()), "nodejsfail-1", nil, nil, nil)
@@ -111,7 +114,8 @@ var _ = g.Describe("[sig-builds][Feature:Builds] s2i build with a root user imag
 		roleBinding, err = oc.AdminKubeClient().RbacV1().RoleBindings(oc.Namespace()).Create(context.Background(), roleBinding, metav1.CreateOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
 
-		err = oc.Run("new-build").Args("docker.io/openshift/test-build-roots2i~https://github.com/sclorg/nodejs-ex", "--name", "nodejspass").Execute()
+		firstArgString := fmt.Sprintf("%s~https://github.com/sclorg/nodejs-ex", image.LocationFor("registry.ci.openshift.org/ocp/4.8:test-build-roots2i"))
+		err = oc.Run("new-build").Args(firstArgString, "--name", "nodejspass").Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		err = exutil.WaitForABuild(oc.BuildClient().BuildV1().Builds(oc.Namespace()), "nodejspass-1", nil, nil, nil)

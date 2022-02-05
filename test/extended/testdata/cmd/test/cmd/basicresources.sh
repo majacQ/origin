@@ -50,7 +50,7 @@ os::test::junit::declare_suite_start "cmd/basicresources/versionreporting"
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_start "cmd/basicresources/status"
-os::cmd::expect_success_and_text 'oc status -h' 'oc describe buildConfig'
+os::cmd::expect_success_and_text 'oc status -h' 'oc describe buildconfig'
 os::cmd::expect_success_and_text 'oc status' 'oc new-app'
 echo "status help output: ok"
 os::test::junit::declare_suite_end
@@ -108,8 +108,6 @@ os::test::junit::declare_suite_start "cmd/basicresources/services"
 os::cmd::expect_success 'oc get services'
 os::cmd::expect_success 'oc create -f ${TEST_DATA}/test-service.json'
 os::cmd::expect_success 'oc delete services frontend'
-# TODO: reenable with a permission check
-# os::cmd::expect_failure_and_text 'oc create -f test/integration/testdata/test-service-with-finalizer.json' "finalizers are disabled"
 echo "services: ok"
 os::test::junit::declare_suite_end
 
@@ -120,8 +118,8 @@ os::cmd::expect_success 'oc get      -f ${TEST_DATA}/mixed-api-versions.yaml -o 
 os::cmd::expect_success 'oc label    -f ${TEST_DATA}/mixed-api-versions.yaml mylabel=a'
 os::cmd::expect_success 'oc annotate -f ${TEST_DATA}/mixed-api-versions.yaml myannotation=b'
 # Make sure all six resources, with different API versions, got labeled and annotated
-os::cmd::expect_success_and_text 'oc get -f ${TEST_DATA}/mixed-api-versions.yaml --output=jsonpath="{..metadata.labels.mylabel}"'           '^a a a a$'
-os::cmd::expect_success_and_text 'oc get -f ${TEST_DATA}/mixed-api-versions.yaml --output=jsonpath="{..metadata.annotations.myannotation}"' '^b b b b$'
+os::cmd::expect_success_and_text 'oc get -f ${TEST_DATA}/mixed-api-versions.yaml --output=jsonpath="{..metadata.labels.mylabel}"'           'a a a a'
+os::cmd::expect_success_and_text 'oc get -f ${TEST_DATA}/mixed-api-versions.yaml --output=jsonpath="{..metadata.annotations.myannotation}"' 'b b b b'
 os::cmd::expect_success 'oc delete   -f ${TEST_DATA}/mixed-api-versions.yaml'
 echo "list version conversion: ok"
 os::test::junit::declare_suite_end
@@ -147,10 +145,12 @@ echo "create subcommands: ok"
 os::test::junit::declare_suite_end
 
 os::test::junit::declare_suite_start "cmd/basicresources/statefulsets"
+os::cmd::expect_success 'oc create -f ${TEST_DATA}/test-service.json'
 os::cmd::expect_success 'oc create -f ${TEST_DATA}/statefulset.yaml'
 os::cmd::try_until_success 'oc get pods testapp-0'
 os::cmd::expect_success_and_text 'oc describe statefulset testapp' 'app=testapp'
 os::cmd::expect_success 'oc delete -f ${TEST_DATA}/statefulset.yaml'
+os::cmd::expect_success 'oc delete services frontend'
 echo "statefulsets: ok"
 os::test::junit::declare_suite_end
 
@@ -263,7 +263,7 @@ os::test::junit::declare_suite_end
 
 # Test OAuth access token describer
 os::cmd::expect_success 'oc create -f ${TEST_DATA}/oauthaccesstoken.yaml'
-os::cmd::expect_success_and_text "oc describe oauthaccesstoken DYGZDLucARCPIfUeKPhsgPfn0WBLR_9KdeREH0c9iod" "DYGZDLucARCPIfUeKPhsgPfn0WBLR_9KdeREH0c9iod"
+os::cmd::expect_success_and_text "oc describe oauthaccesstoken sha256~efaca6fab897953ffcb4f857eb5cbf2cf3a4c33f1314b4922656303426b1cfc9" "efaca6fab897953ffcb4f857eb5cbf2cf3a4c33f1314b4922656303426b1cfc9"
 echo "OAuth descriptor: ok"
 
 os::cmd::expect_success 'oc delete all --all'
@@ -278,16 +278,16 @@ export KUBECONFIG="${temp_config}"
 #os::cmd::expect_success 'oc new-project test-project-admin'
 #os::cmd::try_until_success "oc project test-project-admin"
 
-os::cmd::expect_success 'oc create deploymentconfig --image=openshift/hello-openshift test'
-os::cmd::expect_success 'oc run --image=openshift/hello-openshift --restart=Never test3'
-os::cmd::expect_success 'oc create job --image=openshift/hello-openshift test4'
+os::cmd::expect_success 'oc create deploymentconfig --image=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest test'
+os::cmd::expect_success 'oc run --image=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest --restart=Never test3'
+os::cmd::expect_success 'oc create job --image=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest test4'
 os::cmd::expect_success 'oc delete dc/test pod/test3 job/test4'
 
 os::cmd::expect_success_and_text 'oc create deploymentconfig --dry-run foo --image=bar -o name'               'deploymentconfig.apps.openshift.io/foo'
 os::cmd::expect_success_and_text 'oc run --dry-run foo --image=bar -o name --restart=Never'                'pod/foo'
 os::cmd::expect_success_and_text 'oc create job --dry-run foo --image=bar -o name'              'job.batch/foo'
 os::cmd::expect_success_and_text 'oc create deploymentconfig --dry-run foo --image=bar -o name' 'deploymentconfig.apps.openshift.io/foo'
-os::cmd::expect_success_and_text 'oc run --dry-run foo --image=bar -o name --generator=run-pod/v1'          'pod/foo'
+os::cmd::expect_success_and_text 'oc run --dry-run foo --image=bar -o name'          'pod/foo'
 
 os::cmd::expect_success 'oc process -f ${TEST_DATA}/application-template-stibuild.json -l name=mytemplate | oc create -f -'
 os::cmd::expect_success 'oc delete all -l name=mytemplate'

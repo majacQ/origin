@@ -19,7 +19,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
@@ -117,6 +116,8 @@ var _ = g.Describe("[sig-auth][Feature:ProjectAPI] ", func() {
 			err = oc.AdminAuthorizationClient().AuthorizationV1().RoleBindings(ns02Name).Delete(ctx, bobEditName, metav1.DeleteOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 
+			// this is okay: a user gets an artificial delete event when it loses access to the project
+			// see: https://github.com/openshift/openshift-apiserver/blob/6159c04cbc1b3590f872c78eda3cd14bd6b1e87e/pkg/project/auth/watch.go#L139
 			waitForDelete(ns02Name, w)
 
 			// TEST FOR DELETE PROJECT
@@ -234,7 +235,7 @@ func waitForDelete(projectName string, w watch.Interface) {
 					return
 				}
 
-			case <-time.After(30 * time.Second):
+			case <-time.After(5 * time.Minute):
 				g.Fail(fmt.Sprintf("timeout: %v", projectName))
 			}
 		}
@@ -325,7 +326,7 @@ func waitForOnlyDelete(projectName string, w watch.Interface) {
 				}
 				g.Fail(fmt.Sprintf("got unexpected project %v", project.Name))
 
-			case <-time.After(time.Minute):
+			case <-time.After(3 * time.Minute): // namespace deletions can take a while during busy e2e runs
 				g.Fail(fmt.Sprintf("timeout: %v", projectName))
 			}
 		}
@@ -570,8 +571,9 @@ func GetScopedClientForUser(oc *exutil.CLI, username string, scopes []string) (*
 		return nil, err
 	}
 
+	tokenStr, sha256TokenStr := exutil.GenerateOAuthTokenPair()
 	token := &oauthv1.OAuthAccessToken{
-		ObjectMeta:  metav1.ObjectMeta{Name: fmt.Sprintf("%s-token-plus-some-padding-here-to-make-the-limit-%d", username, rand.Int())},
+		ObjectMeta:  metav1.ObjectMeta{Name: sha256TokenStr},
 		ClientName:  "openshift-challenging-client",
 		ExpiresIn:   86400,
 		Scopes:      scopes,
@@ -585,6 +587,6 @@ func GetScopedClientForUser(oc *exutil.CLI, username string, scopes []string) (*
 	oc.AddResourceToDelete(oauthv1.GroupVersion.WithResource("oauthaccesstokens"), token)
 
 	scopedConfig := rest.AnonymousClientConfig(oc.AdminConfig())
-	scopedConfig.BearerToken = token.Name
+	scopedConfig.BearerToken = tokenStr
 	return scopedConfig, nil
 }

@@ -14,5 +14,5 @@ spec:
     sourceStrategy:
       from:
         kind: DockerImage
-        name: centos/ruby-23-centos7:latest
+        name: image-registry.openshift-image-registry.svc:5000/openshift/ruby:2.7-ubi8
       forcePull: true

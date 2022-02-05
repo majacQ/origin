@@ -30,15 +30,26 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilversion "k8s.io/apimachinery/pkg/util/version"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/component-base/featuregate"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
 	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
+)
+
+// New local storage types to support local storage capacity isolation
+var localStorageCapacityIsolation featuregate.Feature = "LocalStorageCapacityIsolation"
+
+var (
+	downwardAPIHugePages featuregate.Feature = "DownwardAPIHugePages"
+	execProbeTimeout     featuregate.Feature = "ExecProbeTimeout"
+	csiMigration         featuregate.Feature = "CSIMigration"
 )
 
 func skipInternalf(caller int, format string, args ...interface{}) {
@@ -127,8 +138,26 @@ func SkipUnlessAtLeast(value int, minValue int, message string) {
 
 // SkipUnlessLocalEphemeralStorageEnabled skips if the LocalStorageCapacityIsolation is not enabled.
 func SkipUnlessLocalEphemeralStorageEnabled() {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.LocalStorageCapacityIsolation) {
-		skipInternalf(1, "Only supported when %v feature is enabled", features.LocalStorageCapacityIsolation)
+	if !utilfeature.DefaultFeatureGate.Enabled(localStorageCapacityIsolation) {
+		skipInternalf(1, "Only supported when %v feature is enabled", localStorageCapacityIsolation)
+	}
+}
+
+func SkipUnlessDownwardAPIHugePagesEnabled() {
+	if !utilfeature.DefaultFeatureGate.Enabled(downwardAPIHugePages) {
+		skipInternalf(1, "Only supported when %v feature is enabled", downwardAPIHugePages)
+	}
+}
+
+func SkipUnlessExecProbeTimeoutEnabled() {
+	if !utilfeature.DefaultFeatureGate.Enabled(execProbeTimeout) {
+		skipInternalf(1, "Only supported when %v feature is enabled", execProbeTimeout)
+	}
+}
+
+func SkipIfCSIMigrationEnabled() {
+	if utilfeature.DefaultFeatureGate.Enabled(csiMigration) {
+		skipInternalf(1, "Only supported when %v feature is disabled", csiMigration)
 	}
 }
 
@@ -175,7 +204,7 @@ func SkipUnlessProviderIs(supportedProviders ...string) {
 
 // SkipUnlessMultizone skips if the cluster does not have multizone.
 func SkipUnlessMultizone(c clientset.Interface) {
-	zones, err := framework.GetClusterZones(c)
+	zones, err := e2enode.GetClusterZones(c)
 	if err != nil {
 		skipInternalf(1, "Error listing cluster zones")
 	}
@@ -186,7 +215,7 @@ func SkipUnlessMultizone(c clientset.Interface) {
 
 // SkipIfMultizone skips if the cluster has multizone.
 func SkipIfMultizone(c clientset.Interface) {
-	zones, err := framework.GetClusterZones(c)
+	zones, err := e2enode.GetClusterZones(c)
 	if err != nil {
 		skipInternalf(1, "Error listing cluster zones")
 	}
@@ -206,6 +235,13 @@ func SkipUnlessMasterOSDistroIs(supportedMasterOsDistros ...string) {
 func SkipUnlessNodeOSDistroIs(supportedNodeOsDistros ...string) {
 	if !framework.NodeOSDistroIs(supportedNodeOsDistros...) {
 		skipInternalf(1, "Only supported for node OS distro %v (not %s)", supportedNodeOsDistros, framework.TestContext.NodeOSDistro)
+	}
+}
+
+// SkipUnlessNodeOSArchIs skips if the node OS distro is not included in the supportedNodeOsArchs.
+func SkipUnlessNodeOSArchIs(supportedNodeOsArchs ...string) {
+	if !framework.NodeOSArchIs(supportedNodeOsArchs...) {
+		skipInternalf(1, "Only supported for node OS arch %v (not %s)", supportedNodeOsArchs, framework.TestContext.NodeOSArch)
 	}
 }
 
@@ -273,4 +309,26 @@ func RunIfSystemSpecNameIs(names ...string) {
 		}
 	}
 	skipInternalf(1, "Skipped because system spec name %q is not in %v", framework.TestContext.SystemSpecName, names)
+}
+
+// SkipUnlessComponentRunsAsPodsAndClientCanDeleteThem run if the component run as pods and client can delete them
+func SkipUnlessComponentRunsAsPodsAndClientCanDeleteThem(componentName string, c clientset.Interface, ns string, labelSet labels.Set) {
+	// verify if component run as pod
+	label := labels.SelectorFromSet(labelSet)
+	listOpts := metav1.ListOptions{LabelSelector: label.String()}
+	pods, err := c.CoreV1().Pods(ns).List(context.TODO(), listOpts)
+	framework.Logf("SkipUnlessComponentRunsAsPodsAndClientCanDeleteThem: %v, %v", pods, err)
+	if err != nil {
+		skipInternalf(1, "Skipped because client failed to get component:%s pod err:%v", componentName, err)
+	}
+
+	if len(pods.Items) == 0 {
+		skipInternalf(1, "Skipped because component:%s is not running as pod.", componentName)
+	}
+
+	// verify if client can delete pod
+	pod := pods.Items[0]
+	if err := c.CoreV1().Pods(ns).Delete(context.TODO(), pod.Name, metav1.DeleteOptions{DryRun: []string{metav1.DryRunAll}}); err != nil {
+		skipInternalf(1, "Skipped because client failed to delete component:%s pod, err:%v", componentName, err)
+	}
 }

@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/blang/semver"
+	"github.com/openshift/origin/pkg/monitor/monitorapi"
+
 	"github.com/onsi/ginkgo"
 
 	v1 "k8s.io/api/core/v1"
@@ -21,8 +24,10 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/upgrades"
 
+	configv1client "github.com/openshift/client-go/config/clientset/versioned"
 	routeclientset "github.com/openshift/client-go/route/clientset/versioned"
 	"github.com/openshift/origin/pkg/monitor"
+	"github.com/openshift/origin/test/extended/util"
 	"github.com/openshift/origin/test/extended/util/disruption"
 )
 
@@ -44,7 +49,7 @@ type Frontend struct {
 
 func (AvailableTest) Name() string { return "frontend-ingress-available" }
 func (AvailableTest) DisplayName() string {
-	return "Cluster frontend ingress remain available"
+	return "[sig-network-edge] Cluster frontend ingress remain available"
 }
 
 // Setup finds the routes the platform exposes by default
@@ -75,12 +80,14 @@ func (t *AvailableTest) Setup(f *framework.Framework) {
 
 // Test runs a connectivity check to the service.
 func (t *AvailableTest) Test(f *framework.Framework, done <-chan struct{}, upgrade upgrades.UpgradeType) {
+	config, err := framework.LoadConfig()
+	framework.ExpectNoError(err)
 	client, err := framework.LoadClientset()
 	framework.ExpectNoError(err)
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
-	newBroadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: client.EventsV1beta1().Events("")})
+	newBroadcaster := events.NewBroadcaster(&events.EventSinkImpl{Interface: client.EventsV1()})
 	r := newBroadcaster.NewRecorder(scheme.Scheme, "openshift.io/frontends-available-test")
 	newBroadcaster.StartRecordingToSink(stopCh)
 
@@ -103,7 +110,31 @@ func (t *AvailableTest) Test(f *framework.Framework, done <-chan struct{}, upgra
 	cancel()
 	end := time.Now()
 
-	disruption.ExpectNoDisruption(f, 0.20, end.Sub(start), m.Events(time.Time{}, time.Time{}), "Frontends were unreachable during disruption")
+	// starting from 4.8, enforce the requirement that frontends remains available
+	hasAllFixes, err := util.AllClusterVersionsAreGTE(semver.Version{Major: 4, Minor: 8}, config)
+	if err != nil {
+		framework.Logf("Cannot require full control plane availability, some versions could not be checked: %v", err)
+	}
+
+	// Fetch network type for considering whether we allow disruption. For OVN, we currently have to allow disruption
+	// as those tests are failing: BZ: https://bugzilla.redhat.com/show_bug.cgi?id=1983829
+	c, err := configv1client.NewForConfig(config)
+	framework.ExpectNoError(err)
+	network, err := c.ConfigV1().Networks().Get(context.Background(), "cluster", metav1.GetOptions{})
+	framework.ExpectNoError(err)
+
+	toleratedDisruption := 0.20
+	switch {
+	case network.Status.NetworkType == "OVNKubernetes":
+		framework.Logf("Network type is OVNKubernetes, temporarily allowing disruption due to BZ https://bugzilla.redhat.com/show_bug.cgi?id=1983829")
+	// framework.ProviderIs("gce") removed here in 4.9 due to regression. BZ: https://bugzilla.redhat.com/show_bug.cgi?id=1983758
+	case framework.ProviderIs("azure"), framework.ProviderIs("aws"):
+		if hasAllFixes {
+			framework.Logf("Cluster contains no versions older than 4.8, tolerating no disruption")
+			toleratedDisruption = 0
+		}
+	}
+	disruption.ExpectNoDisruption(f, toleratedDisruption, end.Sub(start), m.Intervals(time.Time{}, time.Time{}), "Frontends were unreachable during disruption")
 }
 
 // Teardown cleans up any remaining resources.
@@ -130,37 +161,35 @@ func startEndpointMonitoring(ctx context.Context, m *monitor.Monitor, frontend F
 	if err != nil {
 		return err
 	}
-	m.AddSampler(
-		monitor.StartSampling(ctx, m, time.Second, func(previous bool) (condition *monitor.Condition, next bool) {
-			data, err := continuousClient.Get().AbsPath(frontend.Path).DoRaw(ctx)
-			if err == nil && !bytes.Contains(data, []byte(frontend.Expect)) {
-				err = fmt.Errorf("route returned success but did not contain the correct body contents: %q", string(data))
+	go monitor.NewSampler(m, time.Second, func(previous bool) (condition *monitorapi.Condition, next bool) {
+		data, err := continuousClient.Get().AbsPath(frontend.Path).DoRaw(ctx)
+		if err == nil && !bytes.Contains(data, []byte(frontend.Expect)) {
+			err = fmt.Errorf("route returned success but did not contain the correct body contents: %q", string(data))
+		}
+		switch {
+		case err == nil && !previous:
+			condition = &monitorapi.Condition{
+				Level:   monitorapi.Info,
+				Locator: locateRoute(frontend.Namespace, frontend.Name),
+				Message: "Route started responding to GET requests on reused connections",
 			}
-			switch {
-			case err == nil && !previous:
-				condition = &monitor.Condition{
-					Level:   monitor.Info,
-					Locator: locateRoute(frontend.Namespace, frontend.Name),
-					Message: "Route started responding to GET requests on reused connections",
-				}
-			case err != nil && previous:
-				framework.Logf("Route %s is unreachable on reused connections: %v", frontend.Name, err)
-				r.Eventf(&v1.ObjectReference{Kind: "Route", Namespace: "kube-system", Name: frontend.Name}, nil, v1.EventTypeWarning, "Unreachable", "detected", "on reused connections")
-				condition = &monitor.Condition{
-					Level:   monitor.Error,
-					Locator: locateRoute(frontend.Namespace, frontend.Name),
-					Message: "Route stopped responding to GET requests on reused connections",
-				}
-			case err != nil:
-				framework.Logf("Route %s is unreachable on reused connections: %v", frontend.Name, err)
+		case err != nil && previous:
+			framework.Logf("Route %s is unreachable on reused connections: %v", frontend.Name, err)
+			r.Eventf(&v1.ObjectReference{Kind: "Route", Namespace: "kube-system", Name: frontend.Name}, nil, v1.EventTypeWarning, "Unreachable", "detected", "on reused connections")
+			condition = &monitorapi.Condition{
+				Level:   monitorapi.Error,
+				Locator: locateRoute(frontend.Namespace, frontend.Name),
+				Message: "Route stopped responding to GET requests on reused connections",
 			}
-			return condition, err == nil
-		}).ConditionWhenFailing(&monitor.Condition{
-			Level:   monitor.Error,
-			Locator: locateRoute(frontend.Namespace, frontend.Name),
-			Message: "Route is not responding to GET requests on reused connections",
-		}),
-	)
+		case err != nil:
+			framework.Logf("Route %s is unreachable on reused connections: %v", frontend.Name, err)
+		}
+		return condition, err == nil
+	}).WhenFailing(ctx, &monitorapi.Condition{
+		Level:   monitorapi.Error,
+		Locator: locateRoute(frontend.Namespace, frontend.Name),
+		Message: "Route is not responding to GET requests on reused connections",
+	})
 
 	// this client creates fresh connections and detects failure to establish connections
 	client, err := rest.UnversionedRESTClientFor(&rest.Config{
@@ -183,40 +212,38 @@ func startEndpointMonitoring(ctx context.Context, m *monitor.Monitor, frontend F
 	if err != nil {
 		return err
 	}
-	m.AddSampler(
-		monitor.StartSampling(ctx, m, time.Second, func(previous bool) (condition *monitor.Condition, next bool) {
-			data, err := client.Get().AbsPath(frontend.Path).DoRaw(ctx)
-			switch {
-			case err == nil && len(frontend.Expect) != 0 && !bytes.Contains(data, []byte(frontend.Expect)):
-				err = fmt.Errorf("route returned success but did not contain the correct body contents: %q", string(data))
-			case err == nil && frontend.ExpectRegexp != nil && !frontend.ExpectRegexp.MatchString(string(data)):
-				err = fmt.Errorf("route returned success but did not contain the correct body contents: %q", string(data))
+	go monitor.NewSampler(m, time.Second, func(previous bool) (condition *monitorapi.Condition, next bool) {
+		data, err := client.Get().AbsPath(frontend.Path).DoRaw(ctx)
+		switch {
+		case err == nil && len(frontend.Expect) != 0 && !bytes.Contains(data, []byte(frontend.Expect)):
+			err = fmt.Errorf("route returned success but did not contain the correct body contents: %q", string(data))
+		case err == nil && frontend.ExpectRegexp != nil && !frontend.ExpectRegexp.MatchString(string(data)):
+			err = fmt.Errorf("route returned success but did not contain the correct body contents: %q", string(data))
+		}
+		switch {
+		case err == nil && !previous:
+			condition = &monitorapi.Condition{
+				Level:   monitorapi.Info,
+				Locator: locateRoute(frontend.Namespace, frontend.Name),
+				Message: "Route started responding to GET requests over new connections",
 			}
-			switch {
-			case err == nil && !previous:
-				condition = &monitor.Condition{
-					Level:   monitor.Info,
-					Locator: locateRoute(frontend.Namespace, frontend.Name),
-					Message: "Route started responding to GET requests over new connections",
-				}
-			case err != nil && previous:
-				framework.Logf("Route %s is unreachable on new connections: %v", frontend.Name, err)
-				r.Eventf(&v1.ObjectReference{Kind: "Route", Namespace: "kube-system", Name: frontend.Name}, nil, v1.EventTypeWarning, "Unreachable", "detected", "on new connections")
-				condition = &monitor.Condition{
-					Level:   monitor.Error,
-					Locator: locateRoute(frontend.Namespace, frontend.Name),
-					Message: "Route stopped responding to GET requests over new connections",
-				}
-			case err != nil:
-				framework.Logf("Route %s is unreachable on new connections: %v", frontend.Name, err)
+		case err != nil && previous:
+			framework.Logf("Route %s is unreachable on new connections: %v", frontend.Name, err)
+			r.Eventf(&v1.ObjectReference{Kind: "Route", Namespace: "kube-system", Name: frontend.Name}, nil, v1.EventTypeWarning, "Unreachable", "detected", "on new connections")
+			condition = &monitorapi.Condition{
+				Level:   monitorapi.Error,
+				Locator: locateRoute(frontend.Namespace, frontend.Name),
+				Message: "Route stopped responding to GET requests over new connections",
 			}
-			return condition, err == nil
-		}).ConditionWhenFailing(&monitor.Condition{
-			Level:   monitor.Error,
-			Locator: locateRoute(frontend.Namespace, frontend.Name),
-			Message: "Route is not responding to GET requests over new connections",
-		}),
-	)
+		case err != nil:
+			framework.Logf("Route %s is unreachable on new connections: %v", frontend.Name, err)
+		}
+		return condition, err == nil
+	}).WhenFailing(ctx, &monitorapi.Condition{
+		Level:   monitorapi.Error,
+		Locator: locateRoute(frontend.Namespace, frontend.Name),
+		Message: "Route is not responding to GET requests over new connections",
+	})
 	return nil
 }
 

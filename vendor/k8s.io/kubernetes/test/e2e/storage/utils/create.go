@@ -20,11 +20,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-
-	imageutils "k8s.io/kubernetes/test/utils/image"
-
-	"github.com/pkg/errors"
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -37,7 +34,8 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/kubernetes/test/e2e/framework"
-	"k8s.io/kubernetes/test/e2e/framework/testfiles"
+	e2etestfiles "k8s.io/kubernetes/test/e2e/framework/testfiles"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 )
 
 // LoadFromManifests loads .yaml or .json manifest files and returns
@@ -59,17 +57,17 @@ func LoadFromManifests(files ...string) ([]interface{}, error) {
 		// Ignore any additional fields for now, just determine what we have.
 		var what What
 		if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), data, &what); err != nil {
-			return errors.Wrap(err, "decode TypeMeta")
+			return fmt.Errorf("decode TypeMeta: %w", err)
 		}
 
 		factory := factories[what]
 		if factory == nil {
-			return errors.Errorf("item of type %+v not supported", what)
+			return fmt.Errorf("item of type %+v not supported", what)
 		}
 
 		object := factory.New()
 		if err := runtime.DecodeInto(scheme.Codecs.UniversalDecoder(), data, object); err != nil {
-			return errors.Wrapf(err, "decode %+v", what)
+			return fmt.Errorf("decode %+v: %w", what, err)
 		}
 		items = append(items, object)
 		return nil
@@ -80,7 +78,7 @@ func LoadFromManifests(files ...string) ([]interface{}, error) {
 
 func visitManifests(cb func([]byte) error, files ...string) error {
 	for _, fileName := range files {
-		data, err := testfiles.Read(fileName)
+		data, err := e2etestfiles.Read(fileName)
 		if err != nil {
 			framework.Failf("reading manifest file: %v", err)
 		}
@@ -97,7 +95,7 @@ func visitManifests(cb func([]byte) error, files ...string) error {
 
 		for _, item := range items {
 			if err := cb(item); err != nil {
-				return errors.Wrap(err, fileName)
+				return fmt.Errorf("%s: %w", fileName, err)
 			}
 		}
 	}
@@ -174,13 +172,13 @@ func CreateItems(f *framework.Framework, ns *v1.Namespace, items ...interface{})
 			if err == nil {
 				done = true
 				break
-			} else if errors.Cause(err) != errorItemNotSupported {
+			} else if !errors.Is(err, errorItemNotSupported) {
 				result = err
 				break
 			}
 		}
 		if result == nil && !done {
-			result = errors.Errorf("item of type %T not supported", item)
+			result = fmt.Errorf("item of type %T not supported", item)
 			break
 		}
 	}
@@ -199,7 +197,7 @@ func CreateItems(f *framework.Framework, ns *v1.Namespace, items ...interface{})
 func CreateFromManifests(f *framework.Framework, driverNamespace *v1.Namespace, patch func(item interface{}) error, files ...string) (func(), error) {
 	items, err := LoadFromManifests(files...)
 	if err != nil {
-		return nil, errors.Wrap(err, "CreateFromManifests")
+		return nil, fmt.Errorf("CreateFromManifests: %w", err)
 	}
 	if err := PatchItems(f, driverNamespace, items...); err != nil {
 		return nil, err
@@ -338,21 +336,21 @@ func patchItemRecursively(f *framework.Framework, driverNamespace *v1.Namespace,
 		PatchName(f, &item.Name)
 		for i := range item.Subjects {
 			if err := patchItemRecursively(f, driverNamespace, &item.Subjects[i]); err != nil {
-				return errors.Wrapf(err, "%T", f)
+				return fmt.Errorf("%T: %w", f, err)
 			}
 		}
 		if err := patchItemRecursively(f, driverNamespace, &item.RoleRef); err != nil {
-			return errors.Wrapf(err, "%T", f)
+			return fmt.Errorf("%T: %w", f, err)
 		}
 	case *rbacv1.RoleBinding:
 		PatchNamespace(f, driverNamespace, &item.Namespace)
 		for i := range item.Subjects {
 			if err := patchItemRecursively(f, driverNamespace, &item.Subjects[i]); err != nil {
-				return errors.Wrapf(err, "%T", f)
+				return fmt.Errorf("%T: %w", f, err)
 			}
 		}
 		if err := patchItemRecursively(f, driverNamespace, &item.RoleRef); err != nil {
-			return errors.Wrapf(err, "%T", f)
+			return fmt.Errorf("%T: %w", f, err)
 		}
 	case *v1.Service:
 		PatchNamespace(f, driverNamespace, &item.ObjectMeta.Namespace)
@@ -373,7 +371,7 @@ func patchItemRecursively(f *framework.Framework, driverNamespace *v1.Namespace,
 			return err
 		}
 	default:
-		return errors.Errorf("missing support for patching item of type %T", item)
+		return fmt.Errorf("missing support for patching item of type %T", item)
 	}
 	return nil
 }
@@ -396,7 +394,7 @@ func (*serviceAccountFactory) Create(f *framework.Framework, ns *v1.Namespace, i
 	}
 	client := f.ClientSet.CoreV1().ServiceAccounts(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create ServiceAccount")
+		return nil, fmt.Errorf("create ServiceAccount: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -418,7 +416,7 @@ func (*clusterRoleFactory) Create(f *framework.Framework, ns *v1.Namespace, i in
 	framework.Logf("Define cluster role %v", item.GetName())
 	client := f.ClientSet.RbacV1().ClusterRoles()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create ClusterRole")
+		return nil, fmt.Errorf("create ClusterRole: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -439,7 +437,7 @@ func (*clusterRoleBindingFactory) Create(f *framework.Framework, ns *v1.Namespac
 
 	client := f.ClientSet.RbacV1().ClusterRoleBindings()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create ClusterRoleBinding")
+		return nil, fmt.Errorf("create ClusterRoleBinding: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -460,7 +458,7 @@ func (*roleFactory) Create(f *framework.Framework, ns *v1.Namespace, i interface
 
 	client := f.ClientSet.RbacV1().Roles(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create Role")
+		return nil, fmt.Errorf("create Role: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -481,7 +479,7 @@ func (*roleBindingFactory) Create(f *framework.Framework, ns *v1.Namespace, i in
 
 	client := f.ClientSet.RbacV1().RoleBindings(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create RoleBinding")
+		return nil, fmt.Errorf("create RoleBinding: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -502,7 +500,7 @@ func (*serviceFactory) Create(f *framework.Framework, ns *v1.Namespace, i interf
 
 	client := f.ClientSet.CoreV1().Services(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create Service")
+		return nil, fmt.Errorf("create Service: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -523,7 +521,7 @@ func (*statefulSetFactory) Create(f *framework.Framework, ns *v1.Namespace, i in
 
 	client := f.ClientSet.AppsV1().StatefulSets(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create StatefulSet")
+		return nil, fmt.Errorf("create StatefulSet: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -544,7 +542,7 @@ func (*daemonSetFactory) Create(f *framework.Framework, ns *v1.Namespace, i inte
 
 	client := f.ClientSet.AppsV1().DaemonSets(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create DaemonSet")
+		return nil, fmt.Errorf("create DaemonSet: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -565,7 +563,7 @@ func (*storageClassFactory) Create(f *framework.Framework, ns *v1.Namespace, i i
 
 	client := f.ClientSet.StorageV1().StorageClasses()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create StorageClass")
+		return nil, fmt.Errorf("create StorageClass: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -586,7 +584,7 @@ func (*csiDriverFactory) Create(f *framework.Framework, ns *v1.Namespace, i inte
 
 	client := f.ClientSet.StorageV1().CSIDrivers()
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create CSIDriver")
+		return nil, fmt.Errorf("create CSIDriver: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})
@@ -607,7 +605,7 @@ func (*secretFactory) Create(f *framework.Framework, ns *v1.Namespace, i interfa
 
 	client := f.ClientSet.CoreV1().Secrets(ns.Name)
 	if _, err := client.Create(context.TODO(), item, metav1.CreateOptions{}); err != nil {
-		return nil, errors.Wrap(err, "create Secret")
+		return nil, fmt.Errorf("create Secret: %w", err)
 	}
 	return func() error {
 		return client.Delete(context.TODO(), item.GetName(), metav1.DeleteOptions{})

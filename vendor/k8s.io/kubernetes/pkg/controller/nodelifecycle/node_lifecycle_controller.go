@@ -24,11 +24,10 @@ package nodelifecycle
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 
 	coordv1 "k8s.io/api/coordination/v1"
 	v1 "k8s.io/api/core/v1"
@@ -38,7 +37,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	appsv1informers "k8s.io/client-go/informers/apps/v1"
 	coordinformers "k8s.io/client-go/informers/coordination/v1"
 	coreinformers "k8s.io/client-go/informers/core/v1"
@@ -53,12 +51,11 @@ import (
 	"k8s.io/client-go/util/flowcontrol"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/component-base/metrics/prometheus/ratelimiter"
+	utilnode "k8s.io/component-helpers/node/topology"
+	kubeletapis "k8s.io/kubelet/pkg/apis"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/nodelifecycle/scheduler"
 	nodeutil "k8s.io/kubernetes/pkg/controller/util/node"
-	kubefeatures "k8s.io/kubernetes/pkg/features"
-	kubeletapis "k8s.io/kubernetes/pkg/kubelet/apis"
-	utilnode "k8s.io/kubernetes/pkg/util/node"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 )
 
@@ -145,21 +142,17 @@ var labelReconcileInfo = []struct {
 	ensureSecondaryExists bool
 }{
 	{
-		// Reconcile the beta and the stable OS label using the beta label as
-		// the source of truth.
-		// TODO(#73084): switch to using the stable label as the source of
-		// truth in v1.18.
-		primaryKey:            kubeletapis.LabelOS,
-		secondaryKey:          v1.LabelOSStable,
+		// Reconcile the beta and the stable OS label using the stable label as the source of truth.
+		// TODO(#89477): no earlier than 1.22: drop the beta labels if they differ from the GA labels
+		primaryKey:            v1.LabelOSStable,
+		secondaryKey:          kubeletapis.LabelOS,
 		ensureSecondaryExists: true,
 	},
 	{
-		// Reconcile the beta and the stable arch label using the beta label as
-		// the source of truth.
-		// TODO(#73084): switch to using the stable label as the source of
-		// truth in v1.18.
-		primaryKey:            kubeletapis.LabelArch,
-		secondaryKey:          v1.LabelArchStable,
+		// Reconcile the beta and the stable arch label using the stable label as the source of truth.
+		// TODO(#89477): no earlier than 1.22: drop the beta labels if they differ from the GA labels
+		primaryKey:            v1.LabelArchStable,
+		secondaryKey:          kubeletapis.LabelArch,
 		ensureSecondaryExists: true,
 	},
 }
@@ -379,7 +372,7 @@ func NewNodeLifecycleController(
 
 	eventBroadcaster := record.NewBroadcaster()
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: "node-controller"})
-	eventBroadcaster.StartLogging(klog.Infof)
+	eventBroadcaster.StartStructuredLogging(0)
 
 	klog.Infof("Sending events to api server.")
 	eventBroadcaster.StartRecordingToSink(
@@ -847,7 +840,7 @@ func (nc *Controller) monitorNodeHealth() error {
 				nodeutil.RecordNodeStatusChange(nc.recorder, node, "NodeNotReady")
 				fallthrough
 			case needsRetry && observedReadyCondition.Status != v1.ConditionTrue:
-				if err = nodeutil.MarkPodsNotReady(nc.kubeClient, pods, node.Name); err != nil {
+				if err = nodeutil.MarkPodsNotReady(nc.kubeClient, nc.recorder, pods, node.Name); err != nil {
 					utilruntime.HandleError(fmt.Errorf("unable to mark all pods NotReady on node %v: %v; queuing for retry", node.Name, err))
 					nc.nodesToRetry.Store(node.Name, struct{}{})
 					continue
@@ -872,7 +865,7 @@ func (nc *Controller) processTaintBaseEviction(node *v1.Node, observedReadyCondi
 			if !nodeutil.SwapNodeControllerTaint(nc.kubeClient, []*v1.Taint{&taintToAdd}, []*v1.Taint{UnreachableTaintTemplate}, node) {
 				klog.Errorf("Failed to instantly swap UnreachableTaint to NotReadyTaint. Will try again in the next cycle.")
 			}
-		} else if nc.markNodeForTainting(node) {
+		} else if nc.markNodeForTainting(node, v1.ConditionFalse) {
 			klog.V(2).Infof("Node %v is NotReady as of %v. Adding it to the Taint queue.",
 				node.Name,
 				decisionTimestamp,
@@ -885,7 +878,7 @@ func (nc *Controller) processTaintBaseEviction(node *v1.Node, observedReadyCondi
 			if !nodeutil.SwapNodeControllerTaint(nc.kubeClient, []*v1.Taint{&taintToAdd}, []*v1.Taint{NotReadyTaintTemplate}, node) {
 				klog.Errorf("Failed to instantly swap NotReadyTaint to UnreachableTaint. Will try again in the next cycle.")
 			}
-		} else if nc.markNodeForTainting(node) {
+		} else if nc.markNodeForTainting(node, v1.ConditionUnknown) {
 			klog.V(2).Infof("Node %v is unresponsive as of %v. Adding it to the Taint queue.",
 				node.Name,
 				decisionTimestamp,
@@ -953,36 +946,8 @@ func (nc *Controller) processNoTaintBaseEviction(node *v1.Node, observedReadyCon
 const labelNodeDisruptionExclusion = "node.kubernetes.io/exclude-disruption"
 
 func isNodeExcludedFromDisruptionChecks(node *v1.Node) bool {
-	// DEPRECATED: will be removed in 1.19
-	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.LegacyNodeRoleBehavior) {
-		if legacyIsMasterNode(node.Name) {
-			return true
-		}
-	}
-	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.NodeDisruptionExclusion) {
-		if _, ok := node.Labels[labelNodeDisruptionExclusion]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// legacyIsMasterNode returns true if given node is a registered master according
-// to the logic historically used for this function. This code path is deprecated
-// and the node disruption exclusion label should be used in the future.
-// This code will not be allowed to update to use the node-role label, since
-// node-roles may not be used for feature enablement.
-// DEPRECATED: Will be removed in 1.19
-func legacyIsMasterNode(nodeName string) bool {
-	// We are trying to capture "master(-...)?$" regexp.
-	// However, using regexp.MatchString() results even in more than 35%
-	// of all space allocations in ControllerManager spent in this function.
-	// That's why we are trying to be a bit smarter.
-	if strings.HasSuffix(nodeName, "master") {
+	if _, ok := node.Labels[labelNodeDisruptionExclusion]; ok {
 		return true
-	}
-	if len(nodeName) >= 10 {
-		return strings.HasSuffix(nodeName[:len(nodeName)-3], "master-")
 	}
 	return false
 }
@@ -1076,7 +1041,7 @@ func (nc *Controller) tryUpdateNodeHealth(node *v1.Node) (time.Duration, v1.Node
 		} else {
 			transitionTime = nodeHealth.readyTransitionTimestamp
 		}
-		if klog.V(5) {
+		if klog.V(5).Enabled() {
 			klog.Infof("Node %s ReadyCondition updated. Updating timestamp: %+v vs %+v.", node.Name, nodeHealth.status, node.Status)
 		} else {
 			klog.V(3).Infof("Node %s ReadyCondition updated. Updating timestamp.", node.Name)
@@ -1330,7 +1295,7 @@ func (nc *Controller) processPod(podItem podUpdateItem) {
 	}
 
 	if currentReadyCondition.Status != v1.ConditionTrue {
-		if err := nodeutil.MarkPodsNotReady(nc.kubeClient, pods, nodeName); err != nil {
+		if err := nodeutil.MarkPodsNotReady(nc.kubeClient, nc.recorder, pods, nodeName); err != nil {
 			klog.Warningf("Unable to mark pod %+v NotReady on node %v: %v.", podItem, nodeName, err)
 			nc.podUpdateQueue.AddRateLimited(podItem)
 		}
@@ -1476,9 +1441,21 @@ func (nc *Controller) evictPods(node *v1.Node, pods []*v1.Pod) (bool, error) {
 	return nc.zonePodEvictor[utilnode.GetZoneKey(node)].Add(node.Name, string(node.UID)), nil
 }
 
-func (nc *Controller) markNodeForTainting(node *v1.Node) bool {
+func (nc *Controller) markNodeForTainting(node *v1.Node, status v1.ConditionStatus) bool {
 	nc.evictorLock.Lock()
 	defer nc.evictorLock.Unlock()
+	if status == v1.ConditionFalse {
+		if !taintutils.TaintExists(node.Spec.Taints, NotReadyTaintTemplate) {
+			nc.zoneNoExecuteTainter[utilnode.GetZoneKey(node)].Remove(node.Name)
+		}
+	}
+
+	if status == v1.ConditionUnknown {
+		if !taintutils.TaintExists(node.Spec.Taints, UnreachableTaintTemplate) {
+			nc.zoneNoExecuteTainter[utilnode.GetZoneKey(node)].Remove(node.Name)
+		}
+	}
+
 	return nc.zoneNoExecuteTainter[utilnode.GetZoneKey(node)].Add(node.Name, string(node.UID))
 }
 

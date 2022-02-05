@@ -13,12 +13,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
+	k8simage "k8s.io/kubernetes/test/utils/image"
 
 	buildv1 "github.com/openshift/api/build/v1"
 	imagev1 "github.com/openshift/api/image/v1"
 	buildv1client "github.com/openshift/client-go/build/clientset/versioned"
 	imagev1client "github.com/openshift/client-go/image/clientset/versioned"
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
 )
 
 var _ = g.Describe("[sig-imageregistry][Feature:ImageLayers] Image layer subresource", func() {
@@ -85,11 +87,11 @@ var _ = g.Describe("[sig-imageregistry][Feature:ImageLayers] Image layer subreso
 				Import: true,
 				Images: []imagev1.ImageImportSpec{
 					{
-						From: corev1.ObjectReference{Kind: "DockerImage", Name: "busybox:latest"},
+						From: corev1.ObjectReference{Kind: "DockerImage", Name: image.ShellImage()},
 						To:   &corev1.LocalObjectReference{Name: "busybox"},
 					},
 					{
-						From: corev1.ObjectReference{Kind: "DockerImage", Name: "mysql:latest"},
+						From: corev1.ObjectReference{Kind: "DockerImage", Name: k8simage.GetE2EImage(k8simage.Agnhost)},
 						To:   &corev1.LocalObjectReference{Name: "mysql"},
 					},
 				},
@@ -183,22 +185,20 @@ RUN mkdir -p /var/lib && echo "a" > /var/lib/file
 		ns = append(ns)
 
 		g.By("waiting for the build to finish")
-		var lastBuild *buildv1.Build
-		err = wait.Poll(time.Second, 2*time.Minute, func() (bool, error) {
-			build, err := buildClient.Builds(oc.Namespace()).Get(ctx, "output", metav1.GetOptions{})
-			if err != nil {
-				return false, err
-			}
-			o.Expect(build.Status.Phase).NotTo(o.Or(o.Equal(buildv1.BuildPhaseFailed), o.Equal(buildv1.BuildPhaseError), o.Equal(buildv1.BuildPhaseCancelled)))
-			lastBuild = build
-			return build.Status.Phase == buildv1.BuildPhaseComplete, nil
-		})
+		err = exutil.WaitForABuild(oc.BuildClient().BuildV1().Builds(oc.Namespace()), "output", nil, nil, nil)
+		if err != nil {
+			exutil.DumpBuildLogs("output", oc)
+		}
 		o.Expect(err).NotTo(o.HaveOccurred())
+
+		build, err := buildClient.Builds(oc.Namespace()).Get(ctx, "output", metav1.GetOptions{})
+		o.Expect(err).NotTo(o.HaveOccurred())
+		o.Expect(build.Status.Phase).To(o.Equal(buildv1.BuildPhaseComplete))
 
 		g.By("checking the layers for the built image")
 		layers, err = client.ImageStreams(oc.Namespace()).Layers(ctx, "output", metav1.GetOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
-		to := lastBuild.Status.Output.To
+		to := build.Status.Output.To
 		o.Expect(to).NotTo(o.BeNil())
 		o.Expect(layers.Images).To(o.HaveKey(to.ImageDigest))
 		builtImageLayers := layers.Images[to.ImageDigest]
