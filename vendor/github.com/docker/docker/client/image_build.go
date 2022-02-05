@@ -14,8 +14,8 @@ import (
 	"github.com/docker/docker/api/types/container"
 )
 
-// ImageBuild sends request to the daemon to build images.
-// The Body in the response implement an io.ReadCloser and it's up to the caller to
+// ImageBuild sends a request to the daemon to build images.
+// The Body in the response implements an io.ReadCloser and it's up to the caller to
 // close it.
 func (cli *Client) ImageBuild(ctx context.Context, buildContext io.Reader, options types.ImageBuildOptions) (types.ImageBuildResponse, error) {
 	query, err := cli.imageBuildOptionsToQuery(options)
@@ -30,12 +30,6 @@ func (cli *Client) ImageBuild(ctx context.Context, buildContext io.Reader, optio
 	}
 	headers.Add("X-Registry-Config", base64.URLEncoding.EncodeToString(buf))
 
-	if options.Platform != "" {
-		if err := cli.NewVersionError("1.32", "platform"); err != nil {
-			return types.ImageBuildResponse{}, err
-		}
-		query.Set("platform", options.Platform)
-	}
 	headers.Set("Content-Type", "application/x-tar")
 
 	serverResp, err := cli.postRaw(ctx, "/build", query, buildContext, headers)
@@ -131,7 +125,22 @@ func (cli *Client) imageBuildOptionsToQuery(options types.ImageBuildOptions) (ur
 		query.Set("session", options.SessionID)
 	}
 	if options.Platform != "" {
+		if err := cli.NewVersionError("1.32", "platform"); err != nil {
+			return query, err
+		}
 		query.Set("platform", strings.ToLower(options.Platform))
+	}
+	if options.BuildID != "" {
+		query.Set("buildid", options.BuildID)
+	}
+	query.Set("version", string(options.Version))
+
+	if options.Outputs != nil {
+		outputsJSON, err := json.Marshal(options.Outputs)
+		if err != nil {
+			return query, err
+		}
+		query.Set("outputs", string(outputsJSON))
 	}
 	return query, nil
 }

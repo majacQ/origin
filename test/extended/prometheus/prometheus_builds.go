@@ -1,24 +1,23 @@
 package prometheus
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
-	"net/url"
-	"time"
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
-	"github.com/prometheus/common/model"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
+	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
 
 	buildv1 "github.com/openshift/api/build/v1"
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/ibmcloud"
+	helper "github.com/openshift/origin/test/extended/util/prometheus"
 )
 
-var _ = g.Describe("[Feature:Prometheus][Feature:Builds] Prometheus", func() {
+var _ = g.Describe("[sig-instrumentation][sig-builds][Feature:Builds] Prometheus", func() {
 	defer g.GinkgoRecover()
 	var (
 		oc = exutil.NewCLIWithoutNamespace("prometheus")
@@ -27,9 +26,9 @@ var _ = g.Describe("[Feature:Prometheus][Feature:Builds] Prometheus", func() {
 	)
 	g.BeforeEach(func() {
 		var ok bool
-		url, bearerToken, ok = locatePrometheus(oc)
+		url, _, bearerToken, ok = helper.LocatePrometheus(oc)
 		if !ok {
-			e2e.Skipf("Prometheus could not be located on this cluster, skipping prometheus test")
+			e2eskipper.Skipf("Prometheus could not be located on this cluster, skipping prometheus test")
 		}
 	})
 
@@ -42,31 +41,29 @@ var _ = g.Describe("[Feature:Prometheus][Feature:Builds] Prometheus", func() {
 
 	g.Describe("when installed on the cluster", func() {
 		g.It("should start and expose a secured proxy and verify build metrics", func() {
-			const (
-				buildCountQuery = "openshift_build_total"
-			)
+			// https://issues.redhat.com/browse/CO-895
+			if e2e.TestContext.Provider == ibmcloud.ProviderName {
+				e2eskipper.Skipf("Prometheus in IBM ROKS clusters does not collect metrics from the OpenShift controller manager because it lives outside of the cluster. " +
+					"The openshift_build_total metric expected by this test is reported by the OpenShift controller manager. " +
+					"Remove this skip when https://issues.redhat.com/browse/CO-895 is implemented.")
+			}
+
 			oc.SetupProject()
 			ns := oc.Namespace()
 			appTemplate := exutil.FixturePath("testdata", "builds", "build-pruning", "successful-build-config.yaml")
 
-			execPodName := e2e.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod", func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "centos:7" })
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
+			}()
 
 			g.By("verifying the oauth-proxy reports a 403 on the root URL")
 			// allow for some retry, a la prometheus.go and its initial hitting of the metrics endpoint after
-			// instantiating prometheus tempalte
-			var err error
-			for i := 0; i < waitForPrometheusStartSeconds; i++ {
-				err = expectURLStatusCodeExec(ns, execPodName, url, 403)
-				if err == nil {
-					break
-				}
-				time.Sleep(time.Second)
-			}
-			o.Expect(err).NotTo(o.HaveOccurred())
+			// instantiating prometheus template
+			helper.ExpectPrometheusEndpoint(ns, execPod.Name, url)
 
 			g.By("verifying a service account token is able to authenticate")
-			err = expectBearerTokenURLStatusCodeExec(ns, execPodName, fmt.Sprintf("%s/graph", url), bearerToken, 200)
+			err := expectBearerTokenURLStatusCodeExec(ns, execPod.Name, fmt.Sprintf("%s/graph", url), bearerToken, 200)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			br := startOpenShiftBuild(oc, appTemplate)
@@ -78,15 +75,12 @@ var _ = g.Describe("[Feature:Prometheus][Feature:Builds] Prometheus", func() {
 
 			g.By("verifying a service account token is able to query terminal build metrics from the Prometheus API")
 			// note, no longer register a metric if it is zero, so a successful build won't have failed or cancelled metrics
-			terminalTests := map[string][]metricTest{
-				buildCountQuery: {
-					metricTest{
-						labels:           map[string]string{"phase": string(buildv1.BuildPhaseComplete)},
-						greaterThanEqual: true,
-					},
-				},
+			buildCountMetricName := fmt.Sprintf(`openshift_build_total{phase="%s"} >= 0`, string(buildv1.BuildPhaseComplete))
+			terminalTests := map[string]bool{
+				buildCountMetricName: true,
 			}
-			runQueries(terminalTests, oc, ns, execPodName, url, bearerToken)
+			err = helper.RunQueries(terminalTests, oc, ns, execPod.Name, url, bearerToken)
+			o.Expect(err).NotTo(o.HaveOccurred())
 
 			// NOTE:  in manual testing on a laptop, starting several serial builds in succession was sufficient for catching
 			// at least a few builds in new/pending state with the default prometheus query interval;  but that has not
@@ -96,77 +90,6 @@ var _ = g.Describe("[Feature:Prometheus][Feature:Builds] Prometheus", func() {
 	})
 })
 
-type prometheusResponse struct {
-	Status string                 `json:"status"`
-	Data   prometheusResponseData `json:"data"`
-}
-
-type prometheusResponseData struct {
-	ResultType string       `json:"resultType"`
-	Result     model.Vector `json:"result"`
-}
-
-type metricTest struct {
-	labels map[string]string
-	// we are not more precise (greater than only, or equal only) becauses the extended build tests
-	// run in parallel on the CI system, and some of the metrics are cross namespace, so we cannot
-	// reliably filter; we do precise count validation in the unit tests, where "entire cluster" activity
-	// is more controlled :-)
-	greaterThanEqual bool
-	value            float64
-	success          bool
-}
-
-func runQueries(metricTests map[string][]metricTest, oc *exutil.CLI, ns, execPodName, baseURL, bearerToken string) {
-	// expect all correct metrics within a reasonable time period
-	errsMap := map[string]error{}
-	for i := 0; i < waitForPrometheusStartSeconds; i++ {
-		for query, tcs := range metricTests {
-			//TODO when the http/query apis discussed at https://github.com/prometheus/client_golang#client-for-the-prometheus-http-api
-			// and introduced at https://github.com/prometheus/client_golang/blob/master/api/prometheus/v1/api.go are vendored into
-			// openshift/origin, look to replace this homegrown http request / query param with that API
-			g.By("perform prometheus metric query " + query)
-			contents, err := getBearerTokenURLViaPod(ns, execPodName, fmt.Sprintf("%s/api/v1/query?%s", baseURL, (url.Values{"query": []string{query}}).Encode()), bearerToken)
-			o.Expect(err).NotTo(o.HaveOccurred())
-			result := prometheusResponse{}
-			json.Unmarshal([]byte(contents), &result)
-			metrics := result.Data.Result
-
-			// for each test case, register that one of the returned metrics has the desired labels and value
-			for j, tc := range tcs {
-				for _, sample := range metrics {
-					if labelsWeWant(sample, tc.labels) && valueWeWant(sample, tc) {
-						tcs[j].success = true
-						break
-					}
-				}
-			}
-
-			// now check the results, see if any bad
-			delete(errsMap, query) // clear out any prior faliures
-			for _, tc := range tcs {
-				if !tc.success {
-					dbg := fmt.Sprintf("query %s for tests %#v had results %s", query, tcs, contents)
-					fmt.Fprintf(g.GinkgoWriter, dbg)
-					errsMap[query] = fmt.Errorf(dbg)
-					break
-				}
-			}
-		}
-
-		if len(errsMap) == 0 {
-			break
-		}
-
-		time.Sleep(time.Second)
-	}
-
-	if len(errsMap) != 0 {
-		exutil.DumpPodLogsStartingWith("prometheus-0", oc)
-	}
-	o.Expect(errsMap).To(o.BeEmpty())
-}
-
 func startOpenShiftBuild(oc *exutil.CLI, appTemplate string) *exutil.BuildResult {
 	g.By(fmt.Sprintf("calling oc create -f %s ", appTemplate))
 	err := oc.Run("create").Args("-f", appTemplate).Execute()
@@ -175,29 +98,4 @@ func startOpenShiftBuild(oc *exutil.CLI, appTemplate string) *exutil.BuildResult
 	br, err := exutil.StartBuildResult(oc, "myphp")
 	o.Expect(err).NotTo(o.HaveOccurred())
 	return br
-}
-
-func labelsWeWant(sample *model.Sample, labels map[string]string) bool {
-	//NOTE - prometheus LabelSet.Equals is of little use to us, since the "instance" label
-	// is specific to the host things are running on, so we can't craft an accurate Metric
-	// to compare against
-	for labelName, labelValue := range labels {
-		if v, ok := sample.Metric[model.LabelName(labelName)]; ok {
-			if string(v) != labelValue {
-				return false
-			}
-		} else {
-			return false
-		}
-	}
-	return true
-}
-
-func valueWeWant(sample *model.Sample, tc metricTest) bool {
-	//NOTE - we could use SampleValue has an Equals func, but since SampleValue has no GreaterThanEqual,
-	// we have to go down the float64 compare anyway
-	if tc.greaterThanEqual {
-		return float64(sample.Value) >= tc.value
-	}
-	return float64(sample.Value) < tc.value
 }

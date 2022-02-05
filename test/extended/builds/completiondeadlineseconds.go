@@ -1,6 +1,8 @@
 package builds
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -8,16 +10,16 @@ import (
 	o "github.com/onsi/gomega"
 
 	buildv1 "github.com/openshift/api/build/v1"
-	buildutil "github.com/openshift/origin/pkg/build/util"
+	"github.com/openshift/library-go/pkg/build/naming"
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds][Slow] builds should have deadlines", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds][Slow] builds should have deadlines", func() {
 	defer g.GinkgoRecover()
 	var (
 		sourceFixture = exutil.FixturePath("testdata", "builds", "test-cds-sourcebuild.json")
 		dockerFixture = exutil.FixturePath("testdata", "builds", "test-cds-dockerbuild.json")
-		oc            = exutil.NewCLI("cli-start-build", exutil.KubeConfigPath())
+		oc            = exutil.NewCLI("cli-start-build")
 	)
 
 	g.Context("", func() {
@@ -49,7 +51,7 @@ var _ = g.Describe("[Feature:Builds][Slow] builds should have deadlines", func()
 				o.Expect(br.Build.Status.Phase).Should(o.BeEquivalentTo(buildv1.BuildPhaseFailed)) // the build should have failed
 
 				g.By("verifying the build pod status")
-				pod, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).Get(buildutil.GetBuildPodName(br.Build), metav1.GetOptions{})
+				pod, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).Get(context.Background(), GetBuildPodName(br.Build), metav1.GetOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 				o.Expect(pod.Status.Phase).Should(o.BeEquivalentTo(corev1.PodFailed))
 				o.Expect(pod.Status.Reason).Should(o.ContainSubstring("DeadlineExceeded"))
@@ -73,7 +75,7 @@ var _ = g.Describe("[Feature:Builds][Slow] builds should have deadlines", func()
 				o.Expect(br.Build.Status.Phase).Should(o.BeEquivalentTo(buildv1.BuildPhaseFailed)) // the build should have failed
 
 				g.By("verifying the build pod status")
-				pod, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).Get(buildutil.GetBuildPodName(br.Build), metav1.GetOptions{})
+				pod, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).Get(context.Background(), GetBuildPodName(br.Build), metav1.GetOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 				o.Expect(pod.Status.Phase).Should(o.BeEquivalentTo(corev1.PodFailed))
 				o.Expect(pod.Status.Reason).Should(o.ContainSubstring("DeadlineExceeded"))
@@ -83,3 +85,10 @@ var _ = g.Describe("[Feature:Builds][Slow] builds should have deadlines", func()
 
 	})
 })
+
+var buildPodSuffix = "build"
+
+// GetBuildPodName returns name of the build pod.
+func GetBuildPodName(build *buildv1.Build) string {
+	return naming.GetPodName(build.Name, buildPodSuffix)
+}

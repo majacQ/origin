@@ -12,12 +12,12 @@ spec:
         name: history-limit
     spec:
       containers:
-      - image: "docker.io/centos:centos7"
+      - image: "image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
         imagePullPolicy: IfNotPresent
         name: myapp
         command:
         - /bin/sleep
-        - "100"
+        - "infinity"
   triggers:
   - type: ConfigChange
   revisionHistoryLimit: 3

@@ -50,6 +50,7 @@ type journalArgs struct {
 	Tail          int
 	Timeout       int
 	Format        string
+	Boot          *int
 	Units         []string
 	Pattern       string
 	CaseSensitive bool
@@ -72,9 +73,19 @@ func newJournalArgsFromURL(query url.Values) (*journalArgs, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parameter 'output' is invalid: %v", err)
 	}
+	if len(format) == 0 {
+		format = "short-precise"
+	}
 	units, err := safeStrings(query["unit"])
 	if err != nil {
 		return nil, fmt.Errorf("parameter 'unit' is invalid: %v", err)
+	}
+	var boot *int
+	if bootStr := query.Get("boot"); len(bootStr) > 0 {
+		boot, err = validIntRange(bootStr, -100, 0)
+		if err != nil {
+			return nil, fmt.Errorf("parameter 'boot' is invalid: %v", err)
+		}
 	}
 	pattern, err := safeString(query.Get("grep"))
 	if err != nil {
@@ -90,6 +101,7 @@ func newJournalArgsFromURL(query url.Values) (*journalArgs, error) {
 		Since: since,
 		Until: until,
 		Tail:  boundedIntegerOrDefault(query.Get("tail"), 0, 100000, 0),
+		Boot:  boot,
 
 		Timeout: boundedIntegerOrDefault(query.Get("timeout"), 1, 60, 30),
 
@@ -100,48 +112,36 @@ func newJournalArgsFromURL(query url.Values) (*journalArgs, error) {
 	}, nil
 }
 
-// Args returns the journalctl arguments for the given args.
-func (a *journalArgs) Args() []string {
-	args := []string{
-		"--utc",
-		"--no-pager",
-		"--boot",
-	}
-	if len(a.Since) > 0 {
-		args = append(args, "--since="+a.Since)
-	}
-	if len(a.Until) > 0 {
-		args = append(args, "--until="+a.Until)
-	}
-	if a.Tail > 0 {
-		args = append(args, "--pager-end", fmt.Sprintf("--lines=%d", a.Tail))
-	}
-	if len(a.Format) > 0 {
-		args = append(args, "--output="+a.Format)
-	}
-	for _, unit := range a.Units {
-		if len(unit) > 0 {
-			args = append(args, "--unit="+unit)
-		}
-	}
-	if len(a.Pattern) > 0 {
-		args = append(args, "--grep="+a.Pattern)
-		args = append(args, fmt.Sprintf("--case-sensitive=%t", a.CaseSensitive))
-	}
-	return args
-}
-
 // Copy streams the contents of the journalctl command executed with the current
 // args to the provided writer, timing out at a.Timeout. If an error occurs a line
 // is written to the output.
 func (a *journalArgs) Copy(w io.Writer) {
-	cmd := exec.Command("journalctl", a.Args()...)
+	// set the deadline to the maximum across both runs
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(time.Duration(a.Timeout)*time.Second))
+	defer cancel()
+	if a.Boot != nil {
+		a.copyForBoot(ctx, w, *a.Boot)
+	} else {
+		// show the previous boot if possible, eating errors
+		a.copyForBoot(ctx, w, -1)
+		// show the current boot
+		a.copyForBoot(ctx, w, 0)
+	}
+}
+
+// copyForBoot invokes the provided args for a named boot record. If previousBoot is != 0, then
+// errors are silently ignored.
+func (a *journalArgs) copyForBoot(ctx context.Context, w io.Writer, previousBoot int) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	cmdStr, args := getLoggingCmd(a, previousBoot)
+	cmd := exec.Command(cmdStr, args...)
 	cmd.Stdout = w
 	cmd.Stderr = w
 
 	// force termination
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(a.Timeout)*time.Second)
-	defer cancel()
 	go func() {
 		<-ctx.Done()
 		if p := cmd.Process; p != nil {
@@ -153,7 +153,9 @@ func (a *journalArgs) Copy(w io.Writer) {
 		if _, ok := err.(*exec.ExitError); ok {
 			return
 		}
-		fmt.Fprintf(w, "error: journal output not available\n")
+		if previousBoot == 0 {
+			fmt.Fprintf(w, "error: journal output not available\n")
+		}
 	}
 }
 
@@ -174,6 +176,17 @@ func boolean(s string, defaultValue bool) bool {
 		return true
 	}
 	return false
+}
+
+func validIntRange(s string, min, max int) (*int, error) {
+	i, err := strconv.Atoi(s)
+	if err != nil {
+		return nil, err
+	}
+	if i < min || i > max {
+		return nil, fmt.Errorf("integer must be in range [%d, %d]", min, max)
+	}
+	return &i, nil
 }
 
 func boundedIntegerOrDefault(s string, min, max, defaultValue int) int {
@@ -200,7 +213,7 @@ var (
 )
 
 const (
-	dateFormat         = `"2006-01-02T15:04:05.999999Z`
+	dateFormat         = `2006-01-02 15:04:05.999999`
 	maxParameterLength = 100
 	maxTotalLength     = 1000
 )
@@ -215,7 +228,7 @@ func validJournalDateRange(s string) (string, error) {
 	if _, err := time.Parse(dateFormat, s); err == nil {
 		return s, nil
 	}
-	return "", fmt.Errorf("date must be a relative time of the form '(+|-)[0-9]+(s|m|h|d)' or a date in 'YYYY-MM-DDTHH:MM:SSZ' form")
+	return "", fmt.Errorf("date must be a relative time of the form '(+|-)[0-9]+(s|m|h|d)' or a date in 'YYYY-MM-DD HH:MM:SS' form")
 }
 
 func safeString(s string) (string, error) {

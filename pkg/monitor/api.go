@@ -3,29 +3,40 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	configclientset "github.com/openshift/client-go/config/clientset/versioned"
+	"github.com/openshift/origin/pkg/monitor/intervalcreation"
+	"github.com/openshift/origin/pkg/monitor/monitorapi"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
-	clientcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/transport"
+)
 
-	configclientset "github.com/openshift/client-go/config/clientset/versioned"
-	clientimagev1 "github.com/openshift/client-go/image/clientset/versioned/typed/image/v1"
+const (
+	LocatorKubeAPIServerNewConnection         = "kube-apiserver-new-connection"
+	LocatorOpenshiftAPIServerNewConnection    = "openshift-apiserver-new-connection"
+	LocatorOAuthAPIServerNewConnection        = "oauth-apiserver-new-connection"
+	LocatorKubeAPIServerReusedConnection      = "kube-apiserver-reused-connection"
+	LocatorOpenshiftAPIServerReusedConnection = "openshift-apiserver-reused-connection"
+	LocatorOAuthAPIServerReusedConnection     = "oauth-apiserver-reused-connection"
 )
 
 // Start begins monitoring the cluster referenced by the default kube configuration until
 // context is finished.
 func Start(ctx context.Context) (*Monitor, error) {
-	m := NewMonitor()
+	m := NewMonitorWithInterval(time.Second)
 	cfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(clientcmd.NewDefaultClientConfigLoadingRules(), &clientcmd.ConfigOverrides{})
 	clusterConfig, err := cfg.ClientConfig()
 	if err != nil {
@@ -40,83 +51,165 @@ func Start(ctx context.Context) (*Monitor, error) {
 		return nil, err
 	}
 
-	if err := startAPIMonitoring(ctx, m, clusterConfig); err != nil {
+	if err := StartKubeAPIMonitoringWithNewConnections(ctx, m, clusterConfig, 5*time.Second); err != nil {
+		return nil, err
+	}
+	if err := StartOpenShiftAPIMonitoringWithNewConnections(ctx, m, clusterConfig, 5*time.Second); err != nil {
+		return nil, err
+	}
+	if err := StartOAuthAPIMonitoringWithNewConnections(ctx, m, clusterConfig, 5*time.Second); err != nil {
+		return nil, err
+	}
+	if err := StartKubeAPIMonitoringWithConnectionReuse(ctx, m, clusterConfig, 5*time.Second); err != nil {
+		return nil, err
+	}
+	if err := StartOpenShiftAPIMonitoringWithConnectionReuse(ctx, m, clusterConfig, 5*time.Second); err != nil {
+		return nil, err
+	}
+	if err := StartOAuthAPIMonitoringWithConnectionReuse(ctx, m, clusterConfig, 5*time.Second); err != nil {
 		return nil, err
 	}
 	startPodMonitoring(ctx, m, client)
 	startNodeMonitoring(ctx, m, client)
 	startEventMonitoring(ctx, m, client)
+
+	// add interval creation at the same point where we add the monitors
 	startClusterOperatorMonitoring(ctx, m, configClient)
+	m.intervalCreationFns = append(
+		m.intervalCreationFns,
+		intervalcreation.IntervalsFromEvents_OperatorAvailable,
+		intervalcreation.IntervalsFromEvents_OperatorProgressing,
+		intervalcreation.IntervalsFromEvents_OperatorDegraded,
+		intervalcreation.IntervalsFromEvents_E2ETests,
+		intervalcreation.IntervalsFromEvents_NodeChanges,
+	)
 
 	m.StartSampling(ctx)
 	return m, nil
 }
 
-func startAPIMonitoring(ctx context.Context, m *Monitor, clusterConfig *rest.Config) error {
-	pollingConfig := *clusterConfig
-	pollingConfig.Timeout = 3 * time.Second
-	pollingClient, err := clientcorev1.NewForConfig(&pollingConfig)
+func StartServerMonitoringWithNewConnections(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration, resourceLocator, url string) error {
+	return startServerMonitoring(ctx, m, clusterConfig, timeout, resourceLocator, url, true)
+}
+
+func StartServerMonitoringWithConnectionReuse(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration, resourceLocator, url string) error {
+	return startServerMonitoring(ctx, m, clusterConfig, timeout, resourceLocator, url, false)
+}
+
+func startServerMonitoring(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration, resourceLocator, url string, disableConnectionReuse bool) error {
+	kubeTransportConfig, err := clusterConfig.TransportConfig()
 	if err != nil {
 		return err
 	}
-	openshiftPollingClient, err := clientimagev1.NewForConfig(&pollingConfig)
+	tlsConfig, err := transport.TLSConfigFor(kubeTransportConfig)
 	if err != nil {
 		return err
 	}
+	var httpTransport *http.Transport
 
-	m.AddSampler(
-		StartSampling(ctx, m, time.Second, func(previous bool) (condition *Condition, next bool) {
-			_, err := pollingClient.Namespaces().Get("kube-system", metav1.GetOptions{})
-			switch {
-			case err == nil && !previous:
-				condition = &Condition{
-					Level:   Info,
-					Locator: "kube-apiserver",
-					Message: "Kube API started responding to GET requests",
-				}
-			case err != nil && previous:
-				condition = &Condition{
-					Level:   Error,
-					Locator: "kube-apiserver",
-					Message: fmt.Sprintf("Kube API started failing: %v", err),
-				}
-			}
-			return condition, err == nil
-		}).ConditionWhenFailing(&Condition{
-			Level:   Error,
-			Locator: "kube-apiserver",
-			Message: fmt.Sprintf("Kube API is not responding to GET requests"),
-		}),
-	)
+	if disableConnectionReuse {
+		httpTransport = &http.Transport{
+			Dial: (&net.Dialer{
+				Timeout:   timeout,
+				KeepAlive: -1, // this looks unnecessary to me, but it was set in other code.
+			}).Dial,
+			TLSClientConfig:     tlsConfig,
+			TLSHandshakeTimeout: timeout,
+			DisableKeepAlives:   true, // this prevents connections from being reused
+			IdleConnTimeout:     timeout,
+		}
+	} else {
+		httpTransport = &http.Transport{
+			Dial: (&net.Dialer{
+				Timeout: timeout,
+			}).Dial,
+			TLSClientConfig:     tlsConfig,
+			TLSHandshakeTimeout: timeout,
+			IdleConnTimeout:     timeout,
+		}
+	}
 
-	m.AddSampler(
-		StartSampling(ctx, m, time.Second, func(previous bool) (condition *Condition, next bool) {
-			_, err := openshiftPollingClient.ImageStreams("openshift-apiserver").Get("missing", metav1.GetOptions{})
-			if !errors.IsUnexpectedServerError(err) && errors.IsNotFound(err) {
-				err = nil
+	roundTripper := http.RoundTripper(httpTransport)
+	if kubeTransportConfig.HasTokenAuth() {
+		roundTripper, err = transport.NewBearerAuthWithRefreshRoundTripper(kubeTransportConfig.BearerToken, kubeTransportConfig.BearerTokenFile, httpTransport)
+		if err != nil {
+			return err
+		}
+
+	}
+
+	httpClient := http.Client{
+		Transport: roundTripper,
+	}
+
+	go NewSampler(m, time.Second, func(previous bool) (condition *monitorapi.Condition, next bool) {
+		resp, err := httpClient.Get(clusterConfig.Host + url)
+
+		// we don't have an error, but the response code was an error, then we have to set an artificial error for the logic below to work.
+		if err == nil && (resp.StatusCode < 200 || resp.StatusCode > 399) {
+			body, err := ioutil.ReadAll(resp.Body)
+			if err == nil {
+				err = fmt.Errorf("error running request: %v: %v", resp.Status, string(body))
+			} else {
+				err = fmt.Errorf("error running request: %v", resp.Status)
 			}
-			switch {
-			case err == nil && !previous:
-				condition = &Condition{
-					Level:   Info,
-					Locator: "openshift-apiserver",
-					Message: "OpenShift API started responding to GET requests",
-				}
-			case err != nil && previous:
-				condition = &Condition{
-					Level:   Info,
-					Locator: "openshift-apiserver",
-					Message: fmt.Sprintf("OpenShift API started failing: %v", err),
-				}
+		}
+		if resp != nil && resp.Body != nil {
+			defer resp.Body.Close()
+		}
+
+		switch {
+		case err == nil && !previous:
+			condition = &monitorapi.Condition{
+				Level:   monitorapi.Info,
+				Locator: resourceLocator,
+				Message: fmt.Sprintf("%s started responding to GET requests", resourceLocator),
 			}
-			return condition, err == nil
-		}).ConditionWhenFailing(&Condition{
-			Level:   Error,
-			Locator: "openshift-apiserver",
-			Message: fmt.Sprintf("OpenShift API is not responding to GET requests"),
-		}),
-	)
+		case err != nil && previous:
+			condition = &monitorapi.Condition{
+				Level:   monitorapi.Error,
+				Locator: resourceLocator,
+				Message: fmt.Sprintf("%s started failing: %v", resourceLocator, err),
+			}
+		}
+		return condition, err == nil
+	}).WhenFailing(ctx, &monitorapi.Condition{
+		Level:   monitorapi.Error,
+		Locator: resourceLocator,
+		Message: fmt.Sprintf("%s is not responding to GET requests", resourceLocator),
+	})
+
 	return nil
+}
+
+func StartKubeAPIMonitoringWithNewConnections(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration) error {
+	// default gets auto-created, so this should always exist
+	return StartServerMonitoringWithNewConnections(ctx, m, clusterConfig, timeout, LocatorKubeAPIServerNewConnection, "/api/v1/namespaces/default")
+}
+
+func StartOpenShiftAPIMonitoringWithNewConnections(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration) error {
+	// this request should never 404, but should be empty/small
+	return StartServerMonitoringWithNewConnections(ctx, m, clusterConfig, timeout, LocatorOpenshiftAPIServerNewConnection, "/apis/image.openshift.io/v1/namespaces/default/imagestreams")
+}
+
+func StartOAuthAPIMonitoringWithNewConnections(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration) error {
+	// this should be relatively small and should not ever 404
+	return StartServerMonitoringWithNewConnections(ctx, m, clusterConfig, timeout, LocatorOAuthAPIServerNewConnection, "/apis/oauth.openshift.io/v1/oauthclients")
+}
+
+func StartKubeAPIMonitoringWithConnectionReuse(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration) error {
+	// default gets auto-created, so this should always exist
+	return StartServerMonitoringWithConnectionReuse(ctx, m, clusterConfig, timeout, LocatorKubeAPIServerReusedConnection, "/api/v1/namespaces/default")
+}
+
+func StartOpenShiftAPIMonitoringWithConnectionReuse(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration) error {
+	// this request should never 404, but should be empty/small
+	return StartServerMonitoringWithConnectionReuse(ctx, m, clusterConfig, timeout, LocatorOpenshiftAPIServerReusedConnection, "/apis/image.openshift.io/v1/namespaces/default/imagestreams")
+}
+
+func StartOAuthAPIMonitoringWithConnectionReuse(ctx context.Context, m *Monitor, clusterConfig *rest.Config, timeout time.Duration) error {
+	// this should be relatively small and should not ever 404
+	return StartServerMonitoringWithConnectionReuse(ctx, m, clusterConfig, timeout, LocatorOAuthAPIServerReusedConnection, "/apis/oauth.openshift.io/v1/oauthclients")
 }
 
 func findContainerStatus(status []corev1.ContainerStatus, name string, position int) *corev1.ContainerStatus {
@@ -149,7 +242,13 @@ func findNodeCondition(status []corev1.NodeCondition, name corev1.NodeConditionT
 
 func locateEvent(event *corev1.Event) string {
 	if len(event.InvolvedObject.Namespace) > 0 {
+		if len(event.Source.Host) > 0 && event.InvolvedObject.Kind != "Node" {
+			return fmt.Sprintf("ns/%s %s/%s node/%s", event.InvolvedObject.Namespace, strings.ToLower(event.InvolvedObject.Kind), event.InvolvedObject.Name, event.Source.Host)
+		}
 		return fmt.Sprintf("ns/%s %s/%s", event.InvolvedObject.Namespace, strings.ToLower(event.InvolvedObject.Kind), event.InvolvedObject.Name)
+	}
+	if len(event.Source.Host) > 0 && event.InvolvedObject.Kind != "Node" {
+		return fmt.Sprintf("%s/%s node/%s", strings.ToLower(event.InvolvedObject.Kind), event.InvolvedObject.Name, event.Source.Host)
 	}
 	return fmt.Sprintf("%s/%s", strings.ToLower(event.InvolvedObject.Kind), event.InvolvedObject.Name)
 }
@@ -158,12 +257,8 @@ func locatePod(pod *corev1.Pod) string {
 	return fmt.Sprintf("ns/%s pod/%s node/%s", pod.Namespace, pod.Name, pod.Spec.NodeName)
 }
 
-func locateNode(node *corev1.Node) string {
-	return fmt.Sprintf("node/%s", node.Name)
-}
-
 func locatePodContainer(pod *corev1.Pod, containerName string) string {
-	return fmt.Sprintf("ns/%s pod/%s node/%s container=%s", pod.Namespace, pod.Name, pod.Spec.NodeName, containerName)
+	return fmt.Sprintf("ns/%s pod/%s node/%s container/%s", pod.Namespace, pod.Name, pod.Spec.NodeName, containerName)
 }
 
 func filterToSystemNamespaces(obj runtime.Object) bool {
@@ -211,8 +306,8 @@ func (w *errorRecordingListWatcher) handle(err error) {
 	defer w.lock.Unlock()
 	if err != nil {
 		if !w.receivedError {
-			w.recorder.Record(Condition{
-				Level:   Error,
+			w.recorder.Record(monitorapi.Condition{
+				Level:   monitorapi.Error,
 				Locator: "kube-apiserver",
 				Message: fmt.Sprintf("failed contacting the API: %v", err),
 			})

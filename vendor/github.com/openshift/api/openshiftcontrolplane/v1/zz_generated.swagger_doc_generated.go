@@ -20,11 +20,11 @@ func (BuildControllerConfig) SwaggerDoc() map[string]string {
 }
 
 var map_BuildDefaultsConfig = map[string]string{
-	"":              "BuildDefaultsConfig controls the default information for Builds",
-	"gitHTTPProxy":  "gitHTTPProxy is the location of the HTTPProxy for Git source",
-	"gitHTTPSProxy": "gitHTTPSProxy is the location of the HTTPSProxy for Git source",
-	"gitNoProxy":    "gitNoProxy is the list of domains for which the proxy should not be used",
-	"env":           "env is a set of default environment variables that will be applied to the build if the specified variables do not exist on the build",
+	"":                       "BuildDefaultsConfig controls the default information for Builds",
+	"gitHTTPProxy":           "gitHTTPProxy is the location of the HTTPProxy for Git source",
+	"gitHTTPSProxy":          "gitHTTPSProxy is the location of the HTTPSProxy for Git source",
+	"gitNoProxy":             "gitNoProxy is the list of domains for which the proxy should not be used",
+	"env":                    "env is a set of default environment variables that will be applied to the build if the specified variables do not exist on the build",
 	"sourceStrategyDefaults": "sourceStrategyDefaults are default values that apply to builds using the source strategy.",
 	"imageLabels":            "imageLabels is a list of labels that are applied to the resulting image. User can override a default label by providing a label with the same name in their Build/BuildConfig.",
 	"nodeSelector":           "nodeSelector is a selector which must be true for the build pod to fit on a node",
@@ -38,7 +38,7 @@ func (BuildDefaultsConfig) SwaggerDoc() map[string]string {
 
 var map_BuildOverridesConfig = map[string]string{
 	"":             "BuildOverridesConfig controls override settings for builds",
-	"forcePull":    "forcePull indicates whether the build strategy should always be set to ForcePull=true",
+	"forcePull":    "forcePull overrides, if set, the equivalent value in the builds, i.e. false disables force pull for all builds, true enables force pull for all builds, independently of what each build specifies itself",
 	"imageLabels":  "imageLabels is a list of labels that are applied to the resulting image. If user provided a label in their Build/BuildConfig with the same name as one in this list, the user's label will be overwritten.",
 	"nodeSelector": "nodeSelector is a selector which must be true for the build pod to fit on a node",
 	"annotations":  "annotations are annotations that will be added to the build pod",
@@ -121,7 +121,7 @@ func (IngressControllerConfig) SwaggerDoc() map[string]string {
 }
 
 var map_JenkinsPipelineConfig = map[string]string{
-	"": "JenkinsPipelineConfig holds configuration for the Jenkins pipeline strategy",
+	"":                     "JenkinsPipelineConfig holds configuration for the Jenkins pipeline strategy",
 	"autoProvisionEnabled": "autoProvisionEnabled determines whether a Jenkins server will be spawned from the provided template when the first build config in the project with type JenkinsPipeline is created. When not specified this option defaults to true.",
 	"templateNamespace":    "templateNamespace contains the namespace name where the Jenkins template is stored",
 	"templateName":         "templateName is the name of the default Jenkins template",

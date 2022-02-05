@@ -2,6 +2,7 @@ package operators
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"text/tabwriter"
 	"time"
@@ -22,6 +23,7 @@ import (
 const (
 	machineAPINamespace     = "openshift-machine-api"
 	nodeLabelSelectorWorker = "node-role.kubernetes.io/worker"
+	machineLabelRole        = "machine.openshift.io/cluster-api-machine-role"
 
 	// time after purge of machine to wait for replacement and ready node
 	// TODO: tighten this further based on node lifecycle controller [appears to be ~5m30s]
@@ -37,7 +39,7 @@ func machineClient(dc dynamic.Interface) dynamic.ResourceInterface {
 // listMachines list all machines scoped by selector
 func listMachines(dc dynamic.Interface, labelSelector string) ([]objx.Map, error) {
 	mc := machineClient(dc)
-	obj, err := mc.List(metav1.ListOptions{
+	obj, err := mc.List(context.Background(), metav1.ListOptions{
 		LabelSelector: labelSelector,
 	})
 	if err != nil {
@@ -51,7 +53,7 @@ func listMachines(dc dynamic.Interface, labelSelector string) ([]objx.Map, error
 // deleteMachine deletes the named machine
 func deleteMachine(dc dynamic.Interface, machineName string) error {
 	mc := machineClient(dc)
-	return mc.Delete(machineName, &metav1.DeleteOptions{})
+	return mc.Delete(context.Background(), machineName, metav1.DeleteOptions{})
 }
 
 // machineName returns the machine name
@@ -91,6 +93,20 @@ func mapNodeNameToMachine(nodes []corev1.Node, machines []objx.Map) (map[string]
 	return result, len(nodes) == len(result)
 }
 
+// mapMachineNameToNodeName returns a tuple (map node to machine by name, true if a match is found for every node)
+func mapMachineNameToNodeName(machines []objx.Map, nodes []corev1.Node) (map[string]string, bool) {
+	result := map[string]string{}
+	for i := range machines {
+		for j := range nodes {
+			if nodes[j].Name == nodeNameFromNodeRef(machines[i]) {
+				result[machineName(machines[i])] = nodes[j].Name
+				break
+			}
+		}
+	}
+	return result, len(machines) == len(result)
+}
+
 func isNodeReady(node corev1.Node) bool {
 	for _, c := range node.Status.Conditions {
 		if c.Type == corev1.NodeReady {
@@ -100,7 +116,7 @@ func isNodeReady(node corev1.Node) bool {
 	return false
 }
 
-var _ = g.Describe("[Feature:Machines][Disruptive] Managed cluster should", func() {
+var _ = g.Describe("[sig-cluster-lifecycle][Feature:Machines][Disruptive] Managed cluster should", func() {
 	defer g.GinkgoRecover()
 
 	g.It("recover from deleted worker machines", func() {
@@ -127,7 +143,7 @@ var _ = g.Describe("[Feature:Machines][Disruptive] Managed cluster should", func
 		}
 
 		// fetch worker nodes
-		workerNodes, err := c.CoreV1().Nodes().List(metav1.ListOptions{
+		workerNodes, err := c.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
 			LabelSelector: nodeLabelSelectorWorker,
 		})
 		o.Expect(err).NotTo(o.HaveOccurred())
@@ -154,7 +170,7 @@ var _ = g.Describe("[Feature:Machines][Disruptive] Managed cluster should", func
 			if err != nil {
 				return false, nil
 			}
-			workerNodes, err = c.CoreV1().Nodes().List(metav1.ListOptions{
+			workerNodes, err = c.CoreV1().Nodes().List(context.Background(), metav1.ListOptions{
 				LabelSelector: nodeLabelSelectorWorker,
 			})
 			if err != nil {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -16,62 +17,74 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 
-	corev1 "k8s.io/api/core/v1"
-	kapierrs "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/kubernetes/pkg/client/conditions"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 
+	corev1 "k8s.io/api/core/v1"
+	kapierrs "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
+
 	exutil "github.com/openshift/origin/test/extended/util"
+
+	configv1 "github.com/openshift/api/config/v1"
+	routev1 "github.com/openshift/api/route/v1"
+	routev1client "github.com/openshift/client-go/route/clientset/versioned/typed/route/v1"
 )
 
-var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
+var _ = g.Describe("[sig-network][Feature:Router]", func() {
 	defer g.GinkgoRecover()
 	var (
-		oc = exutil.NewCLI("router-metrics", exutil.KubeConfigPath())
+		oc = exutil.NewCLI("router-metrics")
 
-		username, password, execPodName, ns, host string
-		statsPort                                 int
-		routerNamespace, serviceIP, bearerToken   string
+		username, password, bearerToken string
+		metricsPort                     int32
+		execPodName, ns, host           string
+
+		proxyProtocol bool
 	)
 
 	g.BeforeEach(func() {
-		var err error
-		var template *corev1.PodTemplateSpec
-		template, routerNamespace, err = exutil.GetRouterPodTemplate(oc)
-		if kapierrs.IsNotFound(err) {
-			g.Skip("no router installed on the cluster")
-			return
-		}
+		infra, err := oc.AdminConfigClient().ConfigV1().Infrastructures().Get(context.Background(), "cluster", metav1.GetOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
-		env := template.Spec.Containers[0].Env
-
-		if len(findEnvVar(env, "ROUTER_METRICS_TYPE")) == 0 {
-			g.Skip("router does not have ROUTER_METRICS_TYPE set")
-			return
+		platformType := infra.Status.Platform
+		if infra.Status.PlatformStatus != nil {
+			platformType = infra.Status.PlatformStatus.Type
 		}
+		proxyProtocol = platformType == configv1.AWSPlatformType
 
-		username, password, err = findStatsUsernameAndPassword(oc, routerNamespace, env)
+		// This test needs to make assertions against a single router pod, so all access
+		// to the router should happen through a single endpoint.
+
+		// Discover the endpoint.
+		endpoint, err := oc.AdminKubeClient().CoreV1().Endpoints("openshift-ingress").Get(context.Background(), "router-internal-default", metav1.GetOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
+		o.Expect(endpoint.Subsets).NotTo(o.BeEmpty())
+		subset := endpoint.Subsets[0]
+		o.Expect(subset.Addresses).NotTo(o.BeEmpty())
 
-		statsPort = 1936
-		statsPortString := findEnvVar(env, "STATS_PORT")
-		if len(statsPortString) > 0 {
-			if port, err := strconv.Atoi(statsPortString); err == nil {
-				statsPort = port
+		// Extract the metrics port by name.
+		for _, port := range subset.Ports {
+			if port.Name == "metrics" {
+				metricsPort = port.Port
+				break
 			}
 		}
+		o.Expect(metricsPort).NotTo(o.BeZero())
 
-		host, err = waitForRouterMetricsIP(oc)
+		// Extract the IP of a single router pod.
+		host = subset.Addresses[0].IP
+
+		// Extract the router pod's stats credentials.
+		statsSecret, err := oc.AdminKubeClient().CoreV1().Secrets("openshift-ingress").Get(context.Background(), "router-stats-default", metav1.GetOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
+		username, password = string(statsSecret.Data["statsUsername"]), string(statsSecret.Data["statsPassword"])
 
-		serviceIP, err = waitForRouterServiceIP(oc)
-		o.Expect(err).NotTo(o.HaveOccurred())
-
+		// Extract a bearer token from Prometheus authorized to access
+		// the router metrics URL.
 		bearerToken, err = findMetricsBearerToken(oc)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
@@ -80,35 +93,43 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 
 	g.AfterEach(func() {
 		if g.CurrentGinkgoTestDescription().Failed {
-			exutil.DumpPodLogsStartingWithInNamespace("router", "default", oc.AsAdmin())
+			exutil.DumpPodLogsStartingWithInNamespace("router", "openshift-ingress", oc.AsAdmin())
 		}
 	})
 
 	g.Describe("The HAProxy router", func() {
 		g.It("should expose a health check on the metrics port", func() {
-			execPodName = exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			execPodName = exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod").Name
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPodName, *metav1.NewDeleteOptions(1))
+			}()
 
 			g.By("listening on the health port")
-			err := expectURLStatusCodeExec(ns, execPodName, fmt.Sprintf("http://%s:%d/healthz", host, statsPort), 200)
+			err := expectURLStatusCodeExec(ns, execPodName, fmt.Sprintf("http://%s/healthz", net.JoinHostPort(host, strconv.Itoa(int(metricsPort)))), 200)
 			o.Expect(err).NotTo(o.HaveOccurred())
 		})
 
-		g.It("[Flaky] should expose prometheus metrics for a route", func() {
+		g.It("should expose prometheus metrics for a route", func() {
 			g.By("when a route exists")
-			configPath := exutil.FixturePath("testdata", "router-metrics.yaml")
+			configPath := exutil.FixturePath("testdata", "router", "router-metrics.yaml")
 			err := oc.Run("create").Args("-f", configPath).Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
-			execPodName = exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			g.By("waiting for the route to be admitted")
+			routeHost, err := waitForAdmittedRoute(2*time.Minute, oc.AdminRouteClient().RouteV1(), ns, "weightedroute", "default", true)
+			o.Expect(err).NotTo(o.HaveOccurred(), "route was not admitted")
+
+			execPodName = exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod").Name
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPodName, *metav1.NewDeleteOptions(1))
+			}()
 
 			g.By("preventing access without a username and password")
-			err = expectURLStatusCodeExec(ns, execPodName, fmt.Sprintf("http://%s:%d/metrics", host, statsPort), 401, 403)
+			err = expectURLStatusCodeExec(ns, execPodName, fmt.Sprintf("http://%s/metrics", net.JoinHostPort(host, strconv.Itoa(int(metricsPort)))), 401, 403)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("validate access using username and password")
-			_, err = getAuthenticatedURLViaPod(ns, execPodName, fmt.Sprintf("http://%s:%d/metrics", host, statsPort), username, password)
+			_, err = getAuthenticatedURLViaPod(ns, execPodName, fmt.Sprintf("http://%s/metrics", net.JoinHostPort(host, strconv.Itoa(int(metricsPort)))), username, password)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("checking for the expected metrics")
@@ -121,12 +142,11 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			p := expfmt.TextParser{}
 
 			err = wait.PollImmediate(2*time.Second, 240*time.Second, func() (bool, error) {
-				results, err = getBearerTokenURLViaPod(ns, execPodName, fmt.Sprintf("http://%s:%d/metrics", host, statsPort), bearerToken)
+				results, err = getBearerTokenURLViaPod(ns, execPodName, fmt.Sprintf("http://%s/metrics", net.JoinHostPort(host, strconv.Itoa(int(metricsPort)))), bearerToken)
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				metrics, err = p.TextToMetricFamilies(bytes.NewBufferString(results))
 				o.Expect(err).NotTo(o.HaveOccurred())
-				//e2e.Logf("Metrics:\n%s", results)
 
 				if len(findGaugesWithLabels(metrics["haproxy_server_up"], serverLabels)) == 2 {
 					if findGaugesWithLabels(metrics["haproxy_backend_connections_total"], routeLabels)[0] >= float64(times) {
@@ -134,7 +154,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 					}
 					// send a burst of traffic to the router
 					g.By("sending traffic to a weighted route")
-					err = expectRouteStatusCodeRepeatedExec(ns, execPodName, fmt.Sprintf("http://%s", serviceIP), "weighted.metrics.example.com", http.StatusOK, times)
+					err = expectRouteStatusCodeRepeatedExec(ns, execPodName, fmt.Sprintf("http://%s", host), routeHost, http.StatusOK, times, proxyProtocol)
 					o.Expect(err).NotTo(o.HaveOccurred())
 				}
 				g.By("retrying metrics until all backend servers appear")
@@ -145,7 +165,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			allEndpoints := sets.NewString()
 			services := []string{"weightedendpoints1", "weightedendpoints2"}
 			for _, name := range services {
-				epts, err := oc.AdminKubeClient().CoreV1().Endpoints(ns).Get(name, metav1.GetOptions{})
+				epts, err := oc.AdminKubeClient().CoreV1().Endpoints(ns).Get(context.Background(), name, metav1.GetOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 				for _, s := range epts.Subsets {
 					for _, a := range s.Addresses {
@@ -163,15 +183,16 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			// route specific metrics from server and backend
 			o.Expect(findGaugesWithLabels(metrics["haproxy_server_http_responses_total"], serverLabels.With("code", "2xx"))).To(o.ConsistOf(o.BeNumerically(">", 0), o.BeNumerically(">", 0)))
 			o.Expect(findGaugesWithLabels(metrics["haproxy_server_http_responses_total"], serverLabels.With("code", "5xx"))).To(o.Equal([]float64{0, 0}))
-			// only server returns response counts
-			o.Expect(findGaugesWithLabels(metrics["haproxy_backend_http_responses_total"], routeLabels.With("code", "2xx"))).To(o.HaveLen(0))
+			// backends will start returning response counts in https://github.com/openshift/router/pull/132
+			if arr := findGaugesWithLabels(metrics["haproxy_backend_http_responses_total"], routeLabels.With("code", "2xx")); len(arr) == 0 {
+				e2e.Logf("waiting for https://github.com/openshift/router/pull/132 to merge before this will be removed")
+			}
 			o.Expect(findGaugesWithLabels(metrics["haproxy_server_connections_total"], serverLabels)).To(o.ConsistOf(o.BeNumerically(">=", 0), o.BeNumerically(">=", 0)))
 			o.Expect(findGaugesWithLabels(metrics["haproxy_backend_connections_total"], routeLabels)).To(o.ConsistOf(o.BeNumerically(">=", times)))
 			o.Expect(findGaugesWithLabels(metrics["haproxy_server_up"], serverLabels)).To(o.Equal([]float64{1, 1}))
 			o.Expect(findGaugesWithLabels(metrics["haproxy_backend_up"], routeLabels)).To(o.Equal([]float64{1}))
 			o.Expect(findGaugesWithLabels(metrics["haproxy_server_bytes_in_total"], serverLabels)).To(o.ConsistOf(o.BeNumerically(">=", 0), o.BeNumerically(">=", 0)))
 			o.Expect(findGaugesWithLabels(metrics["haproxy_server_bytes_out_total"], serverLabels)).To(o.ConsistOf(o.BeNumerically(">=", 0), o.BeNumerically(">=", 0)))
-			o.Expect(findGaugesWithLabels(metrics["haproxy_server_max_sessions"], serverLabels)).To(o.ConsistOf(o.BeNumerically(">", 0), o.BeNumerically(">", 0)))
 
 			// generic metrics
 			o.Expect(findGaugesWithLabels(metrics["haproxy_up"], nil)).To(o.Equal([]float64{1}))
@@ -189,14 +210,14 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			g.By("forcing a router restart after a pod deletion")
 
 			// delete the pod
-			err = oc.AdminKubeClient().CoreV1().Pods(ns).Delete("endpoint-2", nil)
+			err = oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), "endpoint-2", metav1.DeleteOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for the router to reload")
 			time.Sleep(15 * time.Second)
 
 			g.By("checking that some metrics are not reset to 0 after router restart")
-			updatedResults, err := getBearerTokenURLViaPod(ns, execPodName, fmt.Sprintf("http://%s:%d/metrics", host, statsPort), bearerToken)
+			updatedResults, err := getBearerTokenURLViaPod(ns, execPodName, fmt.Sprintf("http://%s/metrics", net.JoinHostPort(host, strconv.Itoa(int(metricsPort)))), bearerToken)
 			o.Expect(err).NotTo(o.HaveOccurred())
 			defer func() { e2e.Logf("final metrics:\n%s", updatedResults) }()
 
@@ -204,18 +225,24 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			o.Expect(err).NotTo(o.HaveOccurred())
 			o.Expect(findGaugesWithLabels(updatedMetrics["haproxy_backend_connections_total"], routeLabels)[0]).To(o.BeNumerically(">=", findGaugesWithLabels(metrics["haproxy_backend_connections_total"], routeLabels)[0]))
 			o.Expect(findGaugesWithLabels(updatedMetrics["haproxy_server_bytes_in_total"], serverLabels)[0]).To(o.BeNumerically(">=", findGaugesWithLabels(metrics["haproxy_server_bytes_in_total"], serverLabels)[0]))
+			// max_sessions should reset after a reload, it is not possible to deterministically ensure max sessions is captured due to the
+			// 30s scrape interval of router + the likelihood the router is being reloaded is high. Just verify that the value is reset
+			// because no one else should be hitting this server.
+			o.Expect(findGaugesWithLabels(updatedMetrics["haproxy_server_max_sessions"], serverLabels)[0]).To(o.Equal(float64(0)))
 		})
 
 		g.It("should expose the profiling endpoints", func() {
-			execPodName = exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			execPodName = exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod").Name
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPodName, *metav1.NewDeleteOptions(1))
+			}()
 
 			g.By("preventing access without a username and password")
-			err := expectURLStatusCodeExec(ns, execPodName, fmt.Sprintf("http://%s:%d/debug/pprof/heap", host, statsPort), 401, 403)
+			err := expectURLStatusCodeExec(ns, execPodName, fmt.Sprintf("http://%s/debug/pprof/heap", net.JoinHostPort(host, strconv.Itoa(int(metricsPort)))), 401, 403)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("at /debug/pprof")
-			results, err := getAuthenticatedURLViaPod(ns, execPodName, fmt.Sprintf("http://%s:%d/debug/pprof/heap?debug=1", host, statsPort), username, password)
+			results, err := getAuthenticatedURLViaPod(ns, execPodName, fmt.Sprintf("http://%s/debug/pprof/heap?debug=1", net.JoinHostPort(host, strconv.Itoa(int(metricsPort)))), username, password)
 			o.Expect(err).NotTo(o.HaveOccurred())
 			o.Expect(results).To(o.ContainSubstring("# runtime.MemStats"))
 		})
@@ -226,11 +253,13 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 				g.Skip("prometheus not found on this cluster")
 			}
 
-			execPodName := e2e.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod", func(pod *corev1.Pod) { pod.Spec.Containers[0].Image = "centos:7" })
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
+			}()
 
 			o.Expect(wait.PollImmediate(10*time.Second, 5*time.Minute, func() (bool, error) {
-				contents, err := getBearerTokenURLViaPod(ns, execPodName, fmt.Sprintf("%s/api/v1/targets", prometheusURL), token)
+				contents, err := getBearerTokenURLViaPod(ns, execPod.Name, fmt.Sprintf("%s/api/v1/targets", prometheusURL), token)
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				targets := &promTargets{}
@@ -295,7 +324,7 @@ func (t *promTargets) Expect(l promLabels, health, scrapeURLPattern string) erro
 }
 
 func waitForServiceAccountInNamespace(c clientset.Interface, ns, serviceAccountName string, timeout time.Duration) error {
-	w, err := c.CoreV1().ServiceAccounts(ns).Watch(metav1.SingleObject(metav1.ObjectMeta{Name: serviceAccountName}))
+	w, err := c.CoreV1().ServiceAccounts(ns).Watch(context.Background(), metav1.SingleObject(metav1.ObjectMeta{Name: serviceAccountName}))
 	if err != nil {
 		return err
 	}
@@ -306,14 +335,14 @@ func waitForServiceAccountInNamespace(c clientset.Interface, ns, serviceAccountN
 }
 
 func locatePrometheus(oc *exutil.CLI) (url, bearerToken string, ok bool) {
-	_, err := oc.AdminKubeClient().CoreV1().Services("openshift-monitoring").Get("prometheus-k8s", metav1.GetOptions{})
+	_, err := oc.AdminKubeClient().CoreV1().Services("openshift-monitoring").Get(context.Background(), "prometheus-k8s", metav1.GetOptions{})
 	if kapierrs.IsNotFound(err) {
 		return "", "", false
 	}
 
 	waitForServiceAccountInNamespace(oc.AdminKubeClient(), "openshift-monitoring", "prometheus-k8s", 2*time.Minute)
 	for i := 0; i < 30; i++ {
-		secrets, err := oc.AdminKubeClient().CoreV1().Secrets("openshift-monitoring").List(metav1.ListOptions{})
+		secrets, err := oc.AdminKubeClient().CoreV1().Secrets("openshift-monitoring").List(context.Background(), metav1.ListOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		for _, secret := range secrets.Items {
 			if secret.Type != corev1.SecretTypeServiceAccountToken {
@@ -334,15 +363,6 @@ func locatePrometheus(oc *exutil.CLI) (url, bearerToken string, ok bool) {
 	o.Expect(bearerToken).ToNot(o.BeEmpty())
 
 	return "https://prometheus-k8s.openshift-monitoring.svc:9091", bearerToken, true
-}
-
-func findEnvVar(vars []corev1.EnvVar, key string) string {
-	for _, v := range vars {
-		if v.Name == key {
-			return v.Value
-		}
-	}
-	return ""
 }
 
 func findMetricsWithLabels(f *dto.MetricFamily, promLabels map[string]string) []*dto.Metric {
@@ -429,41 +449,8 @@ func getBearerTokenURLViaPod(ns, execPodName, url, bearer string) (string, error
 	return output, nil
 }
 
-func findEnvVarSecret(vars []corev1.EnvVar, key string) (string, string) {
-	for _, v := range vars {
-		if v.Name == key {
-			if v.ValueFrom != nil && v.ValueFrom.SecretKeyRef != nil {
-				ref := v.ValueFrom.SecretKeyRef
-				return ref.Name, ref.Key
-			}
-		}
-	}
-	return "", ""
-}
-
-func findStatsUsernameAndPassword(oc *exutil.CLI, ns string, env []corev1.EnvVar) (string, string, error) {
-	secretName, userKey := findEnvVarSecret(env, "STATS_USERNAME")
-	_, passKey := findEnvVarSecret(env, "STATS_PASSWORD")
-
-	if len(secretName) == 0 || len(userKey) == 0 || len(passKey) == 0 {
-		return "", "", fmt.Errorf("stats username and password not found, env: %v", env)
-	}
-
-	secret, err := oc.AdminKubeClient().CoreV1().Secrets(ns).Get(secretName, metav1.GetOptions{})
-	if err != nil {
-		return "", "", err
-	}
-
-	username, ok1 := secret.Data[userKey]
-	password, ok2 := secret.Data[passKey]
-	if !ok1 || !ok2 {
-		return "", "", fmt.Errorf("secret '%s/%s' does not contain key %q or %q", ns, secretName, userKey, passKey)
-	}
-	return string(username), string(password), nil
-}
-
 func findMetricsBearerToken(oc *exutil.CLI) (string, error) {
-	sa, err := oc.AdminKubeClient().CoreV1().ServiceAccounts("openshift-monitoring").Get("prometheus-k8s", metav1.GetOptions{})
+	sa, err := oc.AdminKubeClient().CoreV1().ServiceAccounts("openshift-monitoring").Get(context.Background(), "prometheus-k8s", metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -479,7 +466,7 @@ func findMetricsBearerToken(oc *exutil.CLI) (string, error) {
 		return "", fmt.Errorf("serviceaccount 'openshift-monitoring/prometheus-k8s' does not contain 'prometheus-k8s-token' secret")
 	}
 
-	secret, err := oc.AdminKubeClient().CoreV1().Secrets("openshift-monitoring").Get(secretName, metav1.GetOptions{})
+	secret, err := oc.AdminKubeClient().CoreV1().Secrets("openshift-monitoring").Get(context.Background(), secretName, metav1.GetOptions{})
 	if err != nil {
 		return "", err
 	}
@@ -488,4 +475,30 @@ func findMetricsBearerToken(oc *exutil.CLI) (string, error) {
 		return "", fmt.Errorf("secret 'openshift-monitoring/%s' does not contain bearer token", secretName)
 	}
 	return string(token), nil
+}
+
+func waitForAdmittedRoute(maxInterval time.Duration, client routev1client.RouteV1Interface, ns, name, ingressName string, errorOnRejection bool) (string, error) {
+	var routeHost string
+	err := wait.PollImmediate(time.Second, maxInterval, func() (bool, error) {
+		route, err := client.Routes(ns).Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		ingress := findIngress(route, ingressName)
+		if ingress == nil {
+			return false, nil
+		}
+		if len(ingress.Conditions) == 0 || ingress.Conditions[0].Type != routev1.RouteAdmitted {
+			return false, nil
+		}
+		if errorOnRejection && ingress.Conditions[0].Status == corev1.ConditionFalse {
+			return false, fmt.Errorf("router rejected route: %#v", ingress)
+		}
+		if ingress.Conditions[0].Status != corev1.ConditionTrue {
+			return false, nil
+		}
+		routeHost = ingress.Host
+		return true, nil
+	})
+	return routeHost, err
 }

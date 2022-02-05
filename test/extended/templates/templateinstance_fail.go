@@ -1,6 +1,7 @@
 package templates
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -12,15 +13,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	templatev1 "github.com/openshift/api/template/v1"
-	templatecontroller "github.com/openshift/origin/pkg/template/controller"
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Conformance][templates] templateinstance creation with invalid object reports error", func() {
+var _ = g.Describe("[sig-devex][Feature:Templates] templateinstance creation with invalid object reports error", func() {
 	defer g.GinkgoRecover()
 
 	var (
-		cli             = exutil.NewCLI("templates", exutil.KubeConfigPath())
+		cli             = exutil.NewCLI("templates")
 		templatefixture = exutil.FixturePath("testdata", "templates", "templateinstance_badobject.yaml")
 	)
 
@@ -32,11 +32,11 @@ var _ = g.Describe("[Conformance][templates] templateinstance creation with inva
 			g.By("waiting for error to appear")
 			var templateinstance *templatev1.TemplateInstance
 			err = wait.Poll(time.Second, 1*time.Minute, func() (bool, error) {
-				templateinstance, err = cli.TemplateClient().TemplateV1().TemplateInstances(cli.Namespace()).Get("invalidtemplateinstance", metav1.GetOptions{})
+				templateinstance, err = cli.TemplateClient().TemplateV1().TemplateInstances(cli.Namespace()).Get(context.Background(), "invalidtemplateinstance", metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
-				if templatecontroller.TemplateInstanceHasCondition(templateinstance, templatev1.TemplateInstanceInstantiateFailure, corev1.ConditionTrue) {
+				if TemplateInstanceHasCondition(templateinstance, templatev1.TemplateInstanceInstantiateFailure, corev1.ConditionTrue) {
 					return true, nil
 				}
 				return false, nil

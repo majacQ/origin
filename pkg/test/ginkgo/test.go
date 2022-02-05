@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -27,7 +28,9 @@ type testCase struct {
 	out      []byte
 	success  bool
 	failed   bool
+	timedOut bool
 	skipped  bool
+	flake    bool
 
 	previous *testCase
 }
@@ -61,13 +64,15 @@ type TestSuite struct {
 
 	Matches func(name string) bool
 
-	// Init should be run once before a test in this suite is run. Not called by
-	// methods in this package.
-	Init func() error
-
+	// The number of times to execute each test in this suite.
+	Count int
+	// The maximum parallelism of this suite.
 	Parallelism int
 	// The number of flakes that may occur before this test is marked as a failure.
 	MaximumAllowedFlakes int
+
+	// SyntheticEventTests is a set of suite level synthetics applied
+	SyntheticEventTests JUnitsForEvents
 
 	TestTimeout time.Duration
 }
@@ -104,6 +109,18 @@ func newSuiteFromFile(name string, contents []byte) (*TestSuite, error) {
 		return ok
 	}
 	return suite, nil
+}
+
+func filterWithRegex(suite *TestSuite, regex string) error {
+	re, err := regexp.Compile(regex)
+	if err != nil {
+		return err
+	}
+	origMatches := suite.Matches
+	suite.Matches = func(name string) bool {
+		return origMatches(name) && re.MatchString(name)
+	}
+	return nil
 }
 
 func testNames(tests []*testCase) []string {

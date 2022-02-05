@@ -2,6 +2,7 @@ package router
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"text/tabwriter"
@@ -9,9 +10,10 @@ import (
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
+	"k8s.io/kubernetes/test/e2e/framework/statefulset"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
-	extensionsv1beta1 "k8s.io/api/extensions/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -25,7 +27,7 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
+var _ = g.Describe("[sig-network][Feature:Router]", func() {
 	defer g.GinkgoRecover()
 	var (
 		routerImage string
@@ -38,22 +40,23 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 	g.AfterEach(func() {
 		if g.CurrentGinkgoTestDescription().Failed {
 			client := routeclientset.NewForConfigOrDie(oc.AdminConfig()).RouteV1().Routes(ns)
-			if routes, _ := client.List(metav1.ListOptions{}); routes != nil {
+			if routes, _ := client.List(context.Background(), metav1.ListOptions{}); routes != nil {
 				outputIngress(routes.Items...)
 			}
 			exutil.DumpPodLogsStartingWith("router-", oc)
 		}
 	})
 
-	oc = exutil.NewCLI("router-stress", exutil.KubeConfigPath())
+	oc = exutil.NewCLI("router-stress")
 
 	g.BeforeEach(func() {
 		ns = oc.Namespace()
 
-		routerImage, _ = exutil.FindRouterImage(oc)
-		routerImage = strings.Replace(routerImage, "${component}", "haproxy-router", -1)
+		var err error
+		routerImage, err = exutil.FindRouterImage(oc)
+		o.Expect(err).NotTo(o.HaveOccurred())
 
-		_, err := oc.AdminKubeClient().RbacV1().RoleBindings(ns).Create(&rbacv1.RoleBinding{
+		_, err = oc.AdminKubeClient().RbacV1().RoleBindings(ns).Create(context.Background(), &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "router",
 			},
@@ -67,23 +70,25 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 				Kind: "ClusterRole",
 				Name: "system:router",
 			},
-		})
+		}, metav1.CreateOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
 	})
 
 	g.Describe("The HAProxy router", func() {
 		g.It("converges when multiple routers are writing status", func() {
 			g.By("deploying a scaled out namespace scoped router")
-			rs, err := oc.KubeClient().ExtensionsV1beta1().ReplicaSets(ns).Create(
+			rs, err := oc.KubeClient().AppsV1().ReplicaSets(ns).Create(
+				context.Background(),
 				scaledRouter(
 					routerImage,
 					[]string{
-						"--loglevel=4",
+						"-v=4",
 						fmt.Sprintf("--namespace=%s", ns),
 						"--resync-interval=2m",
 						"--name=namespaced",
 					},
 				),
+				metav1.CreateOptions{},
 			)
 			o.Expect(err).NotTo(o.HaveOccurred())
 			err = waitForReadyReplicaSet(oc.KubeClient(), ns, rs.Name)
@@ -93,7 +98,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			client := routeclientset.NewForConfigOrDie(oc.AdminConfig()).RouteV1().Routes(ns)
 			var rv string
 			for i := 0; i < 10; i++ {
-				_, err := client.Create(&routev1.Route{
+				_, err := client.Create(context.Background(), &routev1.Route{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: fmt.Sprintf("%d", i),
 					},
@@ -103,13 +108,13 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 							TargetPort: intstr.FromInt(8080),
 						},
 					},
-				})
+				}, metav1.CreateOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 
 			g.By("waiting for all routes to have a status")
 			err = wait.Poll(time.Second, 2*time.Minute, func() (bool, error) {
-				routes, err := client.List(metav1.ListOptions{})
+				routes, err := client.List(context.Background(), metav1.ListOptions{})
 				if err != nil {
 					return false, err
 				}
@@ -133,7 +138,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 
 			g.By("verifying that we don't continue to write")
 			writes := 0
-			w, err := client.Watch(metav1.ListOptions{Watch: true, ResourceVersion: rv})
+			w, err := client.Watch(context.Background(), metav1.ListOptions{Watch: true, ResourceVersion: rv})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			defer w.Stop()
 			timer := time.NewTimer(10 * time.Second)
@@ -156,11 +161,12 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 		g.It("converges when multiple routers are writing conflicting status", func() {
 			g.By("deploying a scaled out namespace scoped router")
 
-			rs, err := oc.KubeClient().ExtensionsV1beta1().ReplicaSets(ns).Create(
+			rs, err := oc.KubeClient().AppsV1().ReplicaSets(ns).Create(
+				context.Background(),
 				scaledRouter(
 					routerImage,
 					[]string{
-						"--loglevel=4",
+						"-v=4",
 						fmt.Sprintf("--namespace=%s", ns),
 						// the contention tracker is resync / 10, so this will give us 2 minutes of contention tracking
 						"--resync-interval=20m",
@@ -170,6 +176,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 						"--hostname-template=${name}-${namespace}.$(NAME).local",
 					},
 				),
+				metav1.CreateOptions{},
 			)
 			o.Expect(err).NotTo(o.HaveOccurred())
 			err = waitForReadyReplicaSet(oc.KubeClient(), ns, rs.Name)
@@ -179,7 +186,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			client := routeclientset.NewForConfigOrDie(oc.AdminConfig()).RouteV1().Routes(ns)
 			var rv string
 			for i := 0; i < 20; i++ {
-				_, err := client.Create(&routev1.Route{
+				_, err := client.Create(context.Background(), &routev1.Route{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: fmt.Sprintf("%d", i),
 					},
@@ -189,13 +196,13 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 							TargetPort: intstr.FromInt(8080),
 						},
 					},
-				})
+				}, metav1.CreateOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 
 			g.By("waiting for sufficient routes to have a status")
 			err = wait.Poll(time.Second, 2*time.Minute, func() (bool, error) {
-				routes, err := client.List(metav1.ListOptions{})
+				routes, err := client.List(context.Background(), metav1.ListOptions{})
 				if err != nil {
 					return false, err
 				}
@@ -233,7 +240,7 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 
 			g.By("verifying that we stop writing conflicts rapidly")
 			writes := 0
-			w, err := client.Watch(metav1.ListOptions{Watch: true, ResourceVersion: rv})
+			w, err := client.Watch(context.Background(), metav1.ListOptions{Watch: true, ResourceVersion: rv})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			func() {
 				defer w.Stop()
@@ -250,19 +257,19 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 					}
 				}
 				// we expect to see no more than 10 writes per router (we should hit the hard limit) (3 replicas and 1 master)
-				o.Expect(writes).To(o.BeNumerically("<=", 40))
+				o.Expect(writes).To(o.BeNumerically("<=", 50))
 			}()
 
 			// the os_http_be.map file will vary, so only check the haproxy config
 			verifyCommandEquivalent(oc.KubeClient(), rs, "md5sum /var/lib/haproxy/conf/haproxy.config")
 
 			g.By("clearing a single route's status")
-			route, err := client.Patch("9", types.MergePatchType, []byte(`{"status":{"ingress":[]}}`), "status")
+			route, err := client.Patch(context.Background(), "9", types.MergePatchType, []byte(`{"status":{"ingress":[]}}`), metav1.PatchOptions{}, "status")
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("verifying that only get a few updates")
 			writes = 0
-			w, err = client.Watch(metav1.ListOptions{Watch: true, ResourceVersion: route.ResourceVersion})
+			w, err = client.Watch(context.Background(), metav1.ListOptions{Watch: true, ResourceVersion: route.ResourceVersion})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			func() {
 				defer w.Stop()
@@ -298,14 +305,14 @@ func findIngress(route *routev1.Route, name string) *routev1.RouteIngress {
 	return nil
 }
 
-func scaledRouter(image string, args []string) *extensionsv1beta1.ReplicaSet {
+func scaledRouter(image string, args []string) *appsv1.ReplicaSet {
 	one := int64(1)
 	scale := int32(3)
-	return &extensionsv1beta1.ReplicaSet{
+	return &appsv1.ReplicaSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "router",
 		},
-		Spec: extensionsv1beta1.ReplicaSetSpec{
+		Spec: appsv1.ReplicaSetSpec{
 			Replicas: &scale,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{"app": "router"},
@@ -345,10 +352,10 @@ func outputIngress(routes ...routev1.Route) {
 	e2e.Logf("Routes:\n%s", b.String())
 }
 
-func verifyCommandEquivalent(c clientset.Interface, rs *extensionsv1beta1.ReplicaSet, cmd string) {
+func verifyCommandEquivalent(c clientset.Interface, rs *appsv1.ReplicaSet, cmd string) {
 	selector, err := metav1.LabelSelectorAsSelector(rs.Spec.Selector)
 	o.Expect(err).NotTo(o.HaveOccurred())
-	podList, err := c.CoreV1().Pods(rs.Namespace).List(metav1.ListOptions{LabelSelector: selector.String()})
+	podList, err := c.CoreV1().Pods(rs.Namespace).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	var values map[string]string
@@ -356,7 +363,7 @@ func verifyCommandEquivalent(c clientset.Interface, rs *extensionsv1beta1.Replic
 		values = make(map[string]string)
 		uniques := make(map[string]struct{})
 		for _, pod := range podList.Items {
-			stdout, err := e2e.RunHostCmdWithRetries(pod.Namespace, pod.Name, cmd, e2e.StatefulSetPoll, e2e.StatefulPodTimeout)
+			stdout, err := e2e.RunHostCmdWithRetries(pod.Namespace, pod.Name, cmd, statefulset.StatefulSetPoll, statefulset.StatefulPodTimeout)
 			o.Expect(err).NotTo(o.HaveOccurred())
 			values[pod.Name] = stdout
 			uniques[stdout] = struct{}{}
@@ -374,7 +381,7 @@ func verifyCommandEquivalent(c clientset.Interface, rs *extensionsv1beta1.Replic
 // Waits for longer than the standard e2e method.
 func waitForReadyReplicaSet(c clientset.Interface, ns, name string) error {
 	err := wait.Poll(3*time.Second, 3*time.Minute, func() (bool, error) {
-		rs, err := c.ExtensionsV1beta1().ReplicaSets(ns).Get(name, metav1.GetOptions{})
+		rs, err := c.AppsV1().ReplicaSets(ns).Get(context.Background(), name, metav1.GetOptions{})
 		if err != nil {
 			return false, err
 		}

@@ -10,7 +10,7 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds][Conformance][valueFrom] process valueFrom in build strategy environment variables", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds][valueFrom] process valueFrom in build strategy environment variables", func() {
 	var (
 		valueFromBaseDir               = exutil.FixturePath("testdata", "builds", "valuefrom")
 		testImageStreamFixture         = filepath.Join(valueFromBaseDir, "test-is.json")
@@ -20,7 +20,7 @@ var _ = g.Describe("[Feature:Builds][Conformance][valueFrom] process valueFrom i
 		successfulDockerBuildValueFrom = filepath.Join(valueFromBaseDir, "successful-docker-build-value-from-config.yaml")
 		failedSTIBuildValueFrom        = filepath.Join(valueFromBaseDir, "failed-sti-build-value-from-config.yaml")
 		failedDockerBuildValueFrom     = filepath.Join(valueFromBaseDir, "failed-docker-build-value-from-config.yaml")
-		oc                             = exutil.NewCLI("build-valuefrom", exutil.KubeConfigPath())
+		oc                             = exutil.NewCLI("build-valuefrom")
 	)
 
 	g.Context("", func() {
@@ -42,7 +42,7 @@ var _ = g.Describe("[Feature:Builds][Conformance][valueFrom] process valueFrom i
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("creating test image stream")
-			err = oc.Run("create").Args("-f", testImageStreamFixture).Execute()
+			err = oc.Run("create").Args("-f", testImageStreamFixture, "--validate=false").Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("creating test secret")

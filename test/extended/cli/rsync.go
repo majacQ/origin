@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -19,11 +20,11 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[cli][Slow] can use rsync to upload files to pods", func() {
+var _ = g.Describe("[sig-cli][Slow] can use rsync to upload files to pods", func() {
 	defer g.GinkgoRecover()
 
 	var (
-		oc           = exutil.NewCLI("cli-rsync", exutil.KubeConfigPath())
+		oc           = exutil.NewCLI("cli-rsync")
 		templatePath = exutil.FixturePath("..", "..", "examples", "db-templates", "mariadb-ephemeral-template.json")
 		sourcePath1  = exutil.FixturePath("..", "..", "examples", "image-streams")
 		sourcePath2  = exutil.FixturePath("..", "..", "examples", "sample-app")
@@ -38,12 +39,12 @@ var _ = g.Describe("[cli][Slow] can use rsync to upload files to pods", func() {
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("expecting the mariadb service get endpoints")
-		err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mariadb")
+		err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mariadb")
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("Getting the mariadb pod name")
 		selector, _ := labels.Parse("name=mariadb")
-		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(metav1.ListOptions{LabelSelector: selector.String()})
+		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		o.Expect(len(pods.Items)).ToNot(o.BeZero())
 		podName = pods.Items[0].Name

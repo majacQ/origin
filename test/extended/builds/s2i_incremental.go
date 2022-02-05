@@ -9,11 +9,12 @@ import (
 	o "github.com/onsi/gomega"
 
 	e2e "k8s.io/kubernetes/test/e2e/framework"
+	"k8s.io/kubernetes/test/e2e/framework/pod"
 
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds][Slow] incremental s2i build", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds][Slow] incremental s2i build", func() {
 	defer g.GinkgoRecover()
 
 	const (
@@ -24,7 +25,7 @@ var _ = g.Describe("[Feature:Builds][Slow] incremental s2i build", func() {
 	var (
 		templateFixture      = exutil.FixturePath("testdata", "builds", "incremental-auth-build.json")
 		podAndServiceFixture = exutil.FixturePath("testdata", "builds", "test-build-podsvc.json")
-		oc                   = exutil.NewCLI("build-sti-inc", exutil.KubeConfigPath())
+		oc                   = exutil.NewCLI("build-sti-inc")
 	)
 
 	g.Context("", func() {
@@ -48,15 +49,15 @@ var _ = g.Describe("[Feature:Builds][Slow] incremental s2i build", func() {
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("starting a test build")
-				br, _ := exutil.StartBuildAndWait(oc, "initial-build")
+				br, _ := exutil.StartBuildAndWait(oc, "incremental-build")
 				br.AssertSuccess()
 
 				g.By("starting a test build using the image produced by the last build")
-				br2, _ := exutil.StartBuildAndWait(oc, "internal-build")
+				br2, _ := exutil.StartBuildAndWait(oc, "incremental-build")
 				br2.AssertSuccess()
 
-				g.By("getting the Docker image reference from ImageStream")
-				imageName, err := exutil.GetDockerImageReference(oc.ImageClient().Image().ImageStreams(oc.Namespace()), "internal-image", "latest")
+				g.By("getting the container image reference from ImageStream")
+				imageName, err := exutil.GetDockerImageReference(oc.ImageClient().ImageV1().ImageStreams(oc.Namespace()), "incremental-image", "latest")
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("instantiating a pod and service with the new image")
@@ -64,15 +65,15 @@ var _ = g.Describe("[Feature:Builds][Slow] incremental s2i build", func() {
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for the pod to be running")
-				err = e2e.WaitForPodNameRunningInNamespace(oc.KubeFramework().ClientSet, "build-test-pod", oc.Namespace())
+				err = pod.WaitForPodNameRunningInNamespace(oc.KubeFramework().ClientSet, "build-test-pod", oc.Namespace())
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for the service to become available")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), buildTestService)
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), buildTestService)
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("expecting the pod container has saved artifacts")
-				out, err := oc.Run("exec").Args("-p", buildTestPod, "--", "curl", "http://0.0.0.0:8080").Output()
+				out, err := oc.Run("exec").Args(buildTestPod, "--", "curl", "http://0.0.0.0:8080").Output()
 				if err != nil {
 					logs, _ := oc.Run("logs").Args(buildTestPod).Output()
 					e2e.Failf("Failed to curl in application container: \n%q, pod logs: \n%q", out, logs)

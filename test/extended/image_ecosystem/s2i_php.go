@@ -8,16 +8,14 @@ import (
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
-	e2e "k8s.io/kubernetes/test/e2e/framework"
-
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[image_ecosystem][php][Slow] hot deploy for openshift php image", func() {
+var _ = g.Describe("[sig-devex][Feature:ImageEcosystem][php][Slow] hot deploy for openshift php image", func() {
 	defer g.GinkgoRecover()
 	var (
-		cakephpTemplate = "https://raw.githubusercontent.com/openshift/cakephp-ex/master/openshift/templates/cakephp-mysql.json"
-		oc              = exutil.NewCLI("s2i-php", exutil.KubeConfigPath())
+		cakephpTemplate = "cakephp-mysql-example"
+		oc              = exutil.NewCLI("s2i-php")
 		hotDeployParam  = "OPCACHE_REVALIDATE_FREQ=0"
 		modifyCommand   = []string{"sed", "-ie", `s/\$result\['c'\]/1337/`, "src/Template/Pages/home.ctp"}
 		pageRegexpCount = `<span class="code" id="count-value">([^0][0-9]*)</span>`
@@ -42,8 +40,8 @@ var _ = g.Describe("[image_ecosystem][php][Slow] hot deploy for openshift php im
 			g.It(fmt.Sprintf("should work with hot deploy"), func() {
 
 				exutil.WaitForOpenShiftNamespaceImageStreams(oc)
-				g.By(fmt.Sprintf("calling oc new-app -f %q -p %q", cakephpTemplate, hotDeployParam))
-				err := oc.Run("new-app").Args("-f", cakephpTemplate, "-p", hotDeployParam).Execute()
+				g.By(fmt.Sprintf("calling oc new-app %q -p %q", cakephpTemplate, hotDeployParam))
+				err := oc.Run("new-app").Args(cakephpTemplate, "-p", hotDeployParam).Execute()
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for build to finish")
@@ -57,7 +55,7 @@ var _ = g.Describe("[image_ecosystem][php][Slow] hot deploy for openshift php im
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for endpoint")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "cakephp-mysql-example")
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "cakephp-mysql-example")
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				assertPageCountRegexp := func(priorValue string) string {

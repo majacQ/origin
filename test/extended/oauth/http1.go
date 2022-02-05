@@ -1,7 +1,6 @@
 package oauth
 
 import (
-	"encoding/json"
 	"net/http"
 
 	g "github.com/onsi/ginkgo"
@@ -10,22 +9,16 @@ import (
 
 	"k8s.io/client-go/rest"
 
-	"github.com/openshift/origin/pkg/oauth/util"
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("The OAuth server", func() {
+var _ = g.Describe("[sig-auth][Feature:OAuthServer] OAuth server", func() {
 	defer g.GinkgoRecover()
 
-	oc := exutil.NewCLI("oauth", exutil.KubeConfigPath())
+	oc := exutil.NewCLI("oauth")
 
 	g.It("should use http1.1 only to prevent http2 connection reuse", func() {
-		metadataJSON, err := oc.Run("get").Args("--raw", "/.well-known/oauth-authorization-server").Output()
-		o.Expect(err).NotTo(o.HaveOccurred())
-
-		metadata := &util.OauthAuthorizationServerMetadata{}
-		err = json.Unmarshal([]byte(metadataJSON), metadata)
-		o.Expect(err).NotTo(o.HaveOccurred())
+		metadata := getOAuthWellKnownData(oc)
 
 		tlsClientConfig, err := rest.TLSConfigFor(oc.AdminConfig())
 		o.Expect(err).NotTo(o.HaveOccurred())
@@ -36,6 +29,11 @@ var _ = g.Describe("The OAuth server", func() {
 
 		req, err := http.NewRequest(http.MethodHead, metadata.Issuer, nil)
 		o.Expect(err).NotTo(o.HaveOccurred())
+
+		// there is no HTTP2 proxying implemented in golang, skip
+		if url, _ := http.ProxyFromEnvironment(req); url != nil {
+			g.Skip("this test does not run in proxied environment")
+		}
 
 		_, err = rt.RoundTrip(req)
 		o.Expect(err).NotTo(o.BeNil(), "http2 only request to OAuth server should fail")

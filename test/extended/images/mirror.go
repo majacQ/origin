@@ -1,6 +1,7 @@
 package images
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
@@ -17,12 +18,16 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	kclientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	frameworkpod "k8s.io/kubernetes/test/e2e/framework/pod"
 
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
 )
 
 const podStartupTimeout = 3 * time.Minute
-const testPod1 = `kind: Pod
+
+var testPod1 = fmt.Sprintf(
+	`kind: Pod
 id: oc-image-mirror-test-1
 apiVersion: v1
 metadata:
@@ -32,7 +37,7 @@ metadata:
 spec:
   containers:
   - name: registry-1
-    image: docker.io/library/registry
+    image: %[1]s
     env:
     - name: REGISTRY_HTTP_ADDR
       value: :5001
@@ -43,13 +48,17 @@ spec:
     - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
       value: /tmp
   - name: shell
-    image: openshift/origin:latest
+    image: %[2]s
     command:
     - /bin/sleep
     - infinity
-`
+`,
+	image.LocationFor("docker.io/library/registry:2.7.1"),
+	image.ShellImage(),
+)
 
-const testPod2 = `kind: Pod
+var testPod2 = fmt.Sprintf(
+	`kind: Pod
 id: oc-image-mirror-test-2
 apiVersion: v1
 metadata:
@@ -59,7 +68,7 @@ metadata:
 spec:
   containers:
   - name: registry-1
-    image: docker.io/library/registry
+    image: %[1]s
     env:
     - name: REGISTRY_HTTP_ADDR
       value: :5002
@@ -70,7 +79,7 @@ spec:
     - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
       value: /tmp
   - name: registry-2
-    image: docker.io/library/registry
+    image: %[1]s
     env:
     - name: REGISTRY_HTTP_ADDR
       value: :5003
@@ -81,11 +90,14 @@ spec:
     - name: REGISTRY_STORAGE_FILESYSTEM_ROOTDIRECTORY
       value: /tmp
   - name: shell
-    image: openshift/origin:latest
+    image: %[2]s
     command:
     - /bin/sleep
     - infinity
-`
+`,
+	image.LocationFor("docker.io/library/registry:2.7.1"),
+	image.ShellImage(),
+)
 
 func getRandName() string {
 	c := 20
@@ -128,7 +140,7 @@ func (pod *testPod) syncState(c kclientset.Interface, ns string, timeout time.Du
 
 	err = wait.Poll(2*time.Second, timeout,
 		func() (bool, error) {
-			podList, err := framework.WaitForPodsWithLabel(c, ns, label)
+			podList, err := frameworkpod.WaitForPodsWithLabel(c, ns, label)
 			if err != nil {
 				framework.Logf("Failed getting pods: %v", err)
 				return false, nil // Ignore this error (nil) and try again in "Poll" time
@@ -156,11 +168,11 @@ func (pod *testPod) syncRunning(c kclientset.Interface, ns string, timeout time.
 	return err
 }
 
-func (pod *testPod) NotErr(err error) {
+func (pod *testPod) NotErr(err error) error {
 	if err != nil {
 		exutil.DumpPodLogsStartingWithInNamespace(pod.name, pod.oc.Namespace(), pod.oc)
 	}
-	o.Expect(err).NotTo(o.HaveOccurred())
+	return err
 }
 
 func (pod *testPod) Run() *testPod {
@@ -169,7 +181,7 @@ func (pod *testPod) Run() *testPod {
 	err := pod.oc.Run("create").Args("-f", "-").InputString(pod.spec).Execute()
 	o.Expect(err).NotTo(o.HaveOccurred())
 
-	pod.NotErr(pod.syncRunning(pod.oc.AdminKubeClient(), pod.oc.Namespace(), podStartupTimeout))
+	o.Expect(pod.NotErr(pod.syncRunning(pod.oc.AdminKubeClient(), pod.oc.Namespace(), podStartupTimeout))).NotTo(o.HaveOccurred())
 	return pod
 }
 
@@ -186,7 +198,7 @@ func (pod *testPod) ShellExec(command ...string) *exutil.CLI {
 
 func genDockerConfig(pod *testPod, registryURL, user, token string) {
 	config := fmt.Sprintf(`{"auths":{%q:{"auth":%q}}}`, registryURL, base64.StdEncoding.EncodeToString([]byte(user+":"+token)))
-
+	framework.Logf("Config file: %s", config)
 	err := pod.ShellExec("bash", "-c", "cd /tmp; cat > config.json").InputString(config).Execute()
 	o.Expect(err).NotTo(o.HaveOccurred())
 }
@@ -221,32 +233,33 @@ func requestHasStatusCode(pod *testPod, URL, token, statusCode string) {
 	out, err := runHTTPRequest(pod, URL, headers)
 	o.Expect(err).NotTo(o.HaveOccurred())
 
-	m := regexp.MustCompile(fmt.Sprintf(`(?m)^< HTTP/1\.1 %s `, statusCode)).FindString(out)
+	m := regexp.MustCompile(fmt.Sprintf(`(?m)^< HTTP/(?:1\.1|2) %s `, statusCode)).FindString(out)
 	if len(m) == 0 {
 		err = fmt.Errorf("unexpected status code (expected %s): %s", statusCode, out)
 	}
-	pod.NotErr(err)
+	o.Expect(pod.NotErr(err)).NotTo(o.HaveOccurred())
 }
 
 func testNewBuild(oc *exutil.CLI) (string, string) {
 	isName := "mirror-" + getRandName()
 	istName := isName + ":latest"
 
-	testDockerfile := fmt.Sprintf(`FROM busybox:latest
-RUN echo %s > /1
-RUN echo %s > /2
-RUN echo %s > /3
+	testDockerfile := fmt.Sprintf(`FROM %[4]s
+RUN echo %[1]s > /1
+RUN echo %[2]s > /2
+RUN echo %[3]s > /3
 `,
 		getRandName(),
 		getRandName(),
 		getRandName(),
+		image.ShellImage(),
 	)
 
 	err := oc.Run("new-build").Args("-D", "-", "--to", istName).InputString(testDockerfile).Execute()
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	g.By("starting a test build")
-	bc, err := oc.BuildClient().BuildV1().BuildConfigs(oc.Namespace()).Get(isName, metav1.GetOptions{})
+	bc, err := oc.BuildClient().BuildV1().BuildConfigs(oc.Namespace()).Get(context.Background(), isName, metav1.GetOptions{})
 	o.Expect(err).NotTo(o.HaveOccurred())
 	o.Expect(*bc.Spec.Source.Dockerfile).To(o.Equal(testDockerfile))
 
@@ -255,16 +268,16 @@ RUN echo %s > /3
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	g.By(fmt.Sprintf("checking for the imported tag: %s", istName))
-	ist, err := oc.ImageClient().Image().ImageStreamTags(oc.Namespace()).Get(istName, metav1.GetOptions{})
+	ist, err := oc.ImageClient().ImageV1().ImageStreamTags(oc.Namespace()).Get(context.Background(), istName, metav1.GetOptions{})
 	o.Expect(err).NotTo(o.HaveOccurred())
 
 	return isName, ist.Image.Name
 }
 
-var _ = g.Describe("[Feature:ImageMirror][registry][Slow] Image mirror", func() {
+var _ = g.Describe("[sig-imageregistry][Feature:ImageMirror][Slow] Image mirror", func() {
 	defer g.GinkgoRecover()
 
-	var oc = exutil.NewCLI("image-mirror", exutil.KubeConfigPath())
+	var oc = exutil.NewCLI("image-mirror")
 
 	g.It("mirror image from integrated registry to external registry", func() {
 		g.By("get user credentials")
@@ -279,7 +292,7 @@ var _ = g.Describe("[Feature:ImageMirror][registry][Slow] Image mirror", func() 
 
 		g.By("get the protocol of integrated registry server")
 		schema, err := getRegistrySchema(pod, registryHost)
-		pod.NotErr(err)
+		o.Expect(pod.NotErr(err)).NotTo(o.HaveOccurred())
 
 		framework.Logf("the protocol is %s://%s", schema, registryHost)
 
@@ -298,11 +311,11 @@ var _ = g.Describe("[Feature:ImageMirror][registry][Slow] Image mirror", func() 
 		requestHasStatusCode(pod, fmt.Sprintf("http://127.0.0.1:5001/v2/%s/manifests/%s", repoName, imgName), "", "404")
 
 		g.By("Mirror image from the integrated registry server to the external registry server")
-		command := fmt.Sprintf("cd /tmp; oc --loglevel=8 image mirror %s/%s:latest %s/%s:stable --insecure=true",
+		command := fmt.Sprintf("cd /tmp; oc image mirror %s/%s:latest %s/%s:stable --insecure=true --registry-config config.json",
 			registryHost, repoName, "127.0.0.1:5001", repoName,
 		)
 		err = pod.ShellExec([]string{"bash", "-c", command}...).Execute()
-		pod.NotErr(err)
+		o.Expect(pod.NotErr(err)).NotTo(o.HaveOccurred())
 
 		g.By("Check that we have it in the external registry server")
 		requestHasStatusCode(pod, fmt.Sprintf("http://127.0.0.1:5001/v2/%s/manifests/%s", repoName, imgName), "", "200")
@@ -325,7 +338,7 @@ var _ = g.Describe("[Feature:ImageMirror][registry][Slow] Image mirror", func() 
 
 		g.By("get the protocol of integrated registry server")
 		schema, err := getRegistrySchema(pod, registryHost)
-		pod.NotErr(err)
+		o.Expect(pod.NotErr(err)).NotTo(o.HaveOccurred())
 
 		framework.Logf("the protocol is %s://%s", schema, registryHost)
 
@@ -347,13 +360,13 @@ var _ = g.Describe("[Feature:ImageMirror][registry][Slow] Image mirror", func() 
 		requestHasStatusCode(pod, fmt.Sprintf("http://127.0.0.1:5003/v2/%s/manifests/%s", repoName, imgName), "", "404")
 
 		g.By("Mirror image from the integrated registry server to the external registry server")
-		command := fmt.Sprintf("cd /tmp; oc image mirror %s/%s:latest %s/%s:stable %s/%s:prod --insecure=true",
+		command := fmt.Sprintf("cd /tmp; oc image mirror %s/%s:latest %s/%s:stable %s/%s:prod --insecure=true --registry-config config.json",
 			registryHost, repoName,
 			"127.0.0.1:5002", repoName,
 			"127.0.0.1:5003", repoName,
 		)
 		err = pod.ShellExec([]string{"bash", "-c", command}...).Execute()
-		pod.NotErr(err)
+		o.Expect(pod.NotErr(err)).NotTo(o.HaveOccurred())
 
 		g.By("Check that we have it in the first external registry server")
 		requestHasStatusCode(pod, fmt.Sprintf("http://127.0.0.1:5002/v2/%s/manifests/%s", repoName, imgName), "", "200")

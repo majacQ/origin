@@ -4,31 +4,37 @@ import (
 	"context"
 	"fmt"
 	"io/ioutil"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
-	"k8s.io/klog"
-
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	genericapiserver "k8s.io/apiserver/pkg/server"
-	"k8s.io/apiserver/pkg/server/healthz"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/leaderelection"
-
 	configv1 "github.com/openshift/api/config/v1"
 	operatorv1alpha1 "github.com/openshift/api/operator/v1alpha1"
-
+	"github.com/openshift/library-go/pkg/authorization/hardcodedauthorizer"
 	"github.com/openshift/library-go/pkg/config/client"
 	"github.com/openshift/library-go/pkg/config/configdefaults"
 	leaderelectionconverter "github.com/openshift/library-go/pkg/config/leaderelection"
 	"github.com/openshift/library-go/pkg/config/serving"
 	"github.com/openshift/library-go/pkg/controller/fileobserver"
 	"github.com/openshift/library-go/pkg/operator/events"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/version"
+	"k8s.io/apiserver/pkg/authorization/union"
+	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/server/healthz"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/leaderelection"
+	"k8s.io/client-go/tools/record"
+	"k8s.io/component-base/metrics"
+	"k8s.io/component-base/metrics/legacyregistry"
+	"k8s.io/klog/v2"
 )
 
 // StartFunc is the function to call on leader election start
-type StartFunc func(*ControllerContext) error
+type StartFunc func(context.Context, *ControllerContext) error
 
 type ControllerContext struct {
 	ComponentConfig *unstructured.Unstructured
@@ -47,12 +53,8 @@ type ControllerContext struct {
 	// Server is the GenericAPIServer serving healthz checks and debug info
 	Server *genericapiserver.GenericAPIServer
 
-	stopChan <-chan struct{}
-}
-
-// Done returns a channel which will close on termination.
-func (c ControllerContext) Done() <-chan struct{} {
-	return c.stopChan
+	// Namespace where the operator runs. Either specified on the command line or autodetected.
+	OperatorNamespace string
 }
 
 // defaultObserverInterval specifies the default interval that file observer will do rehash the files it watches and react to any changes
@@ -66,16 +68,25 @@ type ControllerBuilder struct {
 	leaderElection          *configv1.LeaderElection
 	fileObserver            fileobserver.Observer
 	fileObserverReactorFn   func(file string, action fileobserver.ActionType) error
+	eventRecorderOptions    record.CorrelatorOptions
 
-	startFunc        StartFunc
-	componentName    string
-	instanceIdentity string
-	observerInterval time.Duration
+	startFunc          StartFunc
+	componentName      string
+	componentNamespace string
+	instanceIdentity   string
+	observerInterval   time.Duration
 
 	servingInfo          *configv1.HTTPServingInfo
 	authenticationConfig *operatorv1alpha1.DelegatedAuthentication
 	authorizationConfig  *operatorv1alpha1.DelegatedAuthorization
-	healthChecks         []healthz.HealthzChecker
+	healthChecks         []healthz.HealthChecker
+
+	versionInfo *version.Info
+
+	// nonZeroExitFn takes a function that exit the process with non-zero code.
+	// This stub exists for unit test where we can check if the graceful termination work properly.
+	// Default function will klog.Warning(args) and os.Exit(1).
+	nonZeroExitFn func(args ...interface{})
 }
 
 // NewController returns a builder struct for constructing the command you want to run
@@ -84,6 +95,10 @@ func NewController(componentName string, startFunc StartFunc) *ControllerBuilder
 		startFunc:        startFunc,
 		componentName:    componentName,
 		observerInterval: defaultObserverInterval,
+		nonZeroExitFn: func(args ...interface{}) {
+			klog.Warning(args...)
+			os.Exit(1)
+		},
 	}
 }
 
@@ -114,6 +129,11 @@ func (b *ControllerBuilder) WithRestartOnChange(stopCh chan<- struct{}, starting
 	return b
 }
 
+func (b *ControllerBuilder) WithComponentNamespace(ns string) *ControllerBuilder {
+	b.componentNamespace = ns
+	return b
+}
+
 // WithLeaderElection adds leader election options
 func (b *ControllerBuilder) WithLeaderElection(leaderElection configv1.LeaderElection, defaultNamespace, defaultName string) *ControllerBuilder {
 	if leaderElection.Disable {
@@ -122,6 +142,12 @@ func (b *ControllerBuilder) WithLeaderElection(leaderElection configv1.LeaderEle
 
 	defaulted := leaderelectionconverter.LeaderElectionDefaulting(leaderElection, defaultNamespace, defaultName)
 	b.leaderElection = &defaulted
+	return b
+}
+
+// WithVersion accepts a getting that provide binary version information that is used to report build_info information to prometheus
+func (b *ControllerBuilder) WithVersion(info version.Info) *ControllerBuilder {
+	b.versionInfo = &info
 	return b
 }
 
@@ -135,7 +161,7 @@ func (b *ControllerBuilder) WithServer(servingInfo configv1.HTTPServingInfo, aut
 }
 
 // WithHealthChecks adds a list of healthchecks to the server
-func (b *ControllerBuilder) WithHealthChecks(healthChecks ...healthz.HealthzChecker) *ControllerBuilder {
+func (b *ControllerBuilder) WithHealthChecks(healthChecks ...healthz.HealthChecker) *ControllerBuilder {
 	b.healthChecks = append(b.healthChecks, healthChecks...)
 	return b
 }
@@ -154,8 +180,16 @@ func (b *ControllerBuilder) WithInstanceIdentity(identity string) *ControllerBui
 	return b
 }
 
+// WithEventRecorderOptions allows to override the default Kubernetes event recorder correlator options.
+// This is needed if the binary is sending a lot of events.
+// Using events.DefaultOperatorEventRecorderOptions here makes a good default for normal operator binary.
+func (b *ControllerBuilder) WithEventRecorderOptions(options record.CorrelatorOptions) *ControllerBuilder {
+	b.eventRecorderOptions = options
+	return b
+}
+
 // Run starts your controller for you.  It uses leader election if you asked, otherwise it directly calls you
-func (b *ControllerBuilder) Run(config *unstructured.Unstructured, ctx context.Context) error {
+func (b *ControllerBuilder) Run(ctx context.Context, config *unstructured.Unstructured) error {
 	clientConfig, err := b.getClientConfig()
 	if err != nil {
 		return err
@@ -166,15 +200,19 @@ func (b *ControllerBuilder) Run(config *unstructured.Unstructured, ctx context.C
 	}
 
 	kubeClient := kubernetes.NewForConfigOrDie(clientConfig)
-	namespace, err := b.getNamespace()
+	namespace, err := b.getComponentNamespace()
 	if err != nil {
-		panic("unable to read the namespace")
+		klog.Warningf("unable to identify the current namespace for events: %v", err)
 	}
 	controllerRef, err := events.GetControllerReferenceForCurrentPod(kubeClient, namespace, nil)
 	if err != nil {
-		panic(fmt.Sprintf("unable to obtain replicaset reference for events: %v", err))
+		klog.Warningf("unable to get owner reference (falling back to namespace): %v", err)
 	}
-	eventRecorder := events.NewKubeRecorder(kubeClient.CoreV1().Events(namespace), b.componentName, controllerRef)
+	eventRecorder := events.NewKubeRecorderWithOptions(kubeClient.CoreV1().Events(namespace), b.eventRecorderOptions, b.componentName, controllerRef)
+
+	utilruntime.PanicHandlers = append(utilruntime.PanicHandlers, func(r interface{}) {
+		eventRecorder.Warningf(fmt.Sprintf("%sPanic", strings.Title(b.componentName)), "Panic observed: %v", r)
+	})
 
 	// if there is file observer defined for this command, add event into default reaction function.
 	if b.fileObserverReactorFn != nil {
@@ -185,73 +223,131 @@ func (b *ControllerBuilder) Run(config *unstructured.Unstructured, ctx context.C
 		}
 	}
 
-	if b.servingInfo == nil {
-		return fmt.Errorf("server config required for health checks and debugging endpoints")
+	// report the binary version metrics to prometheus
+	if b.versionInfo != nil {
+		buildInfo := metrics.NewGaugeVec(
+			&metrics.GaugeOpts{
+				Name: strings.Replace(namespace, "-", "_", -1) + "_build_info",
+				Help: "A metric with a constant '1' value labeled by major, minor, git version, git commit, git tree state, build date, Go version, " +
+					"and compiler from which " + b.componentName + " was built, and platform on which it is running.",
+				StabilityLevel: metrics.ALPHA,
+			},
+			[]string{"major", "minor", "gitVersion", "gitCommit", "gitTreeState", "buildDate", "goVersion", "compiler", "platform"},
+		)
+		legacyregistry.MustRegister(buildInfo)
+		buildInfo.WithLabelValues(b.versionInfo.Major, b.versionInfo.Minor, b.versionInfo.GitVersion, b.versionInfo.GitCommit, b.versionInfo.GitTreeState, b.versionInfo.BuildDate, b.versionInfo.GoVersion,
+			b.versionInfo.Compiler, b.versionInfo.Platform).Set(1)
+		klog.Infof("%s version %s-%s", b.componentName, b.versionInfo.GitVersion, b.versionInfo.GitCommit)
 	}
 
 	kubeConfig := ""
 	if b.kubeAPIServerConfigFile != nil {
 		kubeConfig = *b.kubeAPIServerConfigFile
 	}
-	serverConfig, err := serving.ToServerConfig(*b.servingInfo, *b.authenticationConfig, *b.authorizationConfig, kubeConfig)
-	if err != nil {
-		return err
-	}
-	serverConfig.HealthzChecks = append(serverConfig.HealthzChecks, b.healthChecks...)
 
-	server, err := serverConfig.Complete(nil).New(b.componentName, genericapiserver.NewEmptyDelegate())
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		if err := server.PrepareRun().Run(ctx.Done()); err != nil {
-			klog.Error(err)
+	var server *genericapiserver.GenericAPIServer
+	if b.servingInfo != nil {
+		serverConfig, err := serving.ToServerConfig(ctx, *b.servingInfo, *b.authenticationConfig, *b.authorizationConfig, kubeConfig)
+		if err != nil {
+			return err
 		}
-		klog.Fatal("server exited")
-	}()
+		serverConfig.Authorization.Authorizer = union.New(
+			// prefix the authorizer with the permissions for metrics scraping which are well known.
+			// openshift RBAC policy will always allow this user to read metrics.
+			hardcodedauthorizer.NewHardCodedMetricsAuthorizer(),
+			serverConfig.Authorization.Authorizer,
+		)
+		serverConfig.HealthzChecks = append(serverConfig.HealthzChecks, b.healthChecks...)
+
+		server, err = serverConfig.Complete(nil).New(b.componentName, genericapiserver.NewEmptyDelegate())
+		if err != nil {
+			return err
+		}
+
+		go func() {
+			if err := server.PrepareRun().Run(ctx.Done()); err != nil {
+				klog.Fatal(err)
+			}
+			klog.Info("server exited")
+		}()
+	}
 
 	protoConfig := rest.CopyConfig(clientConfig)
 	protoConfig.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
 	protoConfig.ContentType = "application/vnd.kubernetes.protobuf"
 
 	controllerContext := &ControllerContext{
-		ComponentConfig: config,
-		KubeConfig:      clientConfig,
-		ProtoKubeConfig: protoConfig,
-		EventRecorder:   eventRecorder,
-		Server:          server,
-		stopChan:        ctx.Done(),
+		ComponentConfig:   config,
+		KubeConfig:        clientConfig,
+		ProtoKubeConfig:   protoConfig,
+		EventRecorder:     eventRecorder,
+		Server:            server,
+		OperatorNamespace: namespace,
 	}
 
 	if b.leaderElection == nil {
-		if err := b.startFunc(controllerContext); err != nil {
+		if err := b.startFunc(ctx, controllerContext); err != nil {
 			return err
 		}
-		return fmt.Errorf("exited")
+		return nil
 	}
 
-	leaderElection, err := leaderelectionconverter.ToConfigMapLeaderElection(clientConfig, *b.leaderElection, b.componentName, b.instanceIdentity)
+	// ensure blocking TCP connections don't block the leader election
+	leaderConfig := rest.CopyConfig(protoConfig)
+	leaderConfig.Timeout = b.leaderElection.RenewDeadline.Duration
+
+	leaderElection, err := leaderelectionconverter.ToConfigMapLeaderElection(leaderConfig, *b.leaderElection, b.componentName, b.instanceIdentity)
 	if err != nil {
 		return err
 	}
 
-	leaderElection.Callbacks.OnStartedLeading = func(ctx context.Context) {
-		controllerContext.stopChan = ctx.Done()
-		if err := b.startFunc(controllerContext); err != nil {
-			klog.Fatal(err)
-		}
-	}
+	// 10s is the graceful termination time we give the controllers to finish their workers.
+	// when this time pass, we exit with non-zero code, killing all controller workers.
+	// NOTE: The pod must set the termination graceful time.
+	leaderElection.Callbacks.OnStartedLeading = b.getOnStartedLeadingFunc(controllerContext, 10*time.Second)
+
 	leaderelection.RunOrDie(ctx, leaderElection)
-	return fmt.Errorf("exited")
+	return nil
 }
 
-func (b *ControllerBuilder) getNamespace() (string, error) {
+func (b ControllerBuilder) getOnStartedLeadingFunc(controllerContext *ControllerContext, gracefulTerminationDuration time.Duration) func(ctx context.Context) {
+	return func(ctx context.Context) {
+		stoppedCh := make(chan struct{})
+		go func() {
+			defer close(stoppedCh)
+			if err := b.startFunc(ctx, controllerContext); err != nil {
+				b.nonZeroExitFn(fmt.Sprintf("graceful termination failed, controllers failed with error: %v", err))
+			}
+		}()
+
+		select {
+		case <-ctx.Done(): // context closed means the process likely received signal to terminate
+			controllerContext.EventRecorder.Shutdown()
+		case <-stoppedCh:
+			// if context was not cancelled (it is not "done"), but the startFunc terminated, it means it terminated prematurely
+			// when this happen, it means the controllers terminated without error.
+			if ctx.Err() == nil {
+				b.nonZeroExitFn("graceful termination failed, controllers terminated prematurely")
+			}
+		}
+
+		select {
+		case <-time.After(gracefulTerminationDuration): // when context was closed above, give controllers extra time to terminate gracefully
+			b.nonZeroExitFn(fmt.Sprintf("graceful termination failed, some controllers failed to shutdown in %s", gracefulTerminationDuration))
+		case <-stoppedCh: // stoppedCh here means the controllers finished termination and we exit 0
+		}
+	}
+}
+
+func (b *ControllerBuilder) getComponentNamespace() (string, error) {
+	if len(b.componentNamespace) > 0 {
+		return b.componentNamespace, nil
+	}
 	nsBytes, err := ioutil.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
 	if err != nil {
-		return "", err
+		return "openshift-config-managed", err
 	}
-	return string(nsBytes), err
+	return string(nsBytes), nil
 }
 
 func (b *ControllerBuilder) getClientConfig() (*rest.Config, error) {

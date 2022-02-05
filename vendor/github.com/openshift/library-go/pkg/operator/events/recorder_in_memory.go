@@ -5,7 +5,7 @@ import (
 	"sync"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog"
+	"k8s.io/klog/v2"
 )
 
 type inMemoryEventRecorder struct {
@@ -37,8 +37,13 @@ func (r *inMemoryEventRecorder) ComponentName() string {
 	return r.source
 }
 
+func (r *inMemoryEventRecorder) Shutdown() {}
+
 func (r *inMemoryEventRecorder) ForComponent(component string) Recorder {
-	return &inMemoryEventRecorder{events: []*corev1.Event{}, source: component}
+	r.Lock()
+	defer r.Unlock()
+	r.source = component
+	return r
 }
 
 func (r *inMemoryEventRecorder) WithComponentSuffix(suffix string) Recorder {

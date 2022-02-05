@@ -1,6 +1,8 @@
 package image_ecosystem
 
-import "fmt"
+import (
+	"fmt"
+)
 
 type ImageBaseType string
 
@@ -12,102 +14,82 @@ type tc struct {
 	// Expected output from the command
 	Expected string
 
-	// Repository is either openshift/ or rhcsl/
-	// The default is 'openshift'
-	Repository string
+	// Tag is the image tag to correlates to the Version string
+	Tag string
 
 	// Internal: We resolve this in JustBeforeEach
 	DockerImageReference string
+
+	// whether this image is supported on s390x or ppc64le
+	NonAMD bool
 }
 
 // This is a complete list of supported S2I images
 var s2iImages = map[string][]tc{
 	"ruby": {
 		{
-			Version:    "22",
-			Cmd:        "ruby --version",
-			Expected:   "ruby 2.2",
-			Repository: "centos",
+			Version:  "27",
+			Cmd:      "ruby --version",
+			Expected: "ruby 2.7",
+			Tag:      "2.7",
+			NonAMD:   true,
 		},
 		{
-			Version:    "23",
-			Cmd:        "ruby --version",
-			Expected:   "ruby 2.3",
-			Repository: "centos",
-		},
-		{
-			Version:    "24",
-			Cmd:        "ruby --version",
-			Expected:   "ruby 2.4",
-			Repository: "centos",
+			Version:  "26",
+			Cmd:      "ruby --version",
+			Expected: "ruby 2.6",
+			Tag:      "2.6",
+			NonAMD:   true,
 		},
 	},
 	"python": {
 		{
-			Version:    "27",
-			Cmd:        "python --version",
-			Expected:   "Python 2.7",
-			Repository: "centos",
+			Version:  "27",
+			Cmd:      "python --version",
+			Expected: "Python 2.7",
+			Tag:      "2.7",
+			NonAMD:   true,
 		},
 		{
-			Version:    "34",
-			Cmd:        "python --version",
-			Expected:   "Python 3.4",
-			Repository: "centos",
-		},
-		{
-			Version:    "35",
-			Cmd:        "python --version",
-			Expected:   "Python 3.5",
-			Repository: "centos",
-		},
-		{
-			Version:    "36",
-			Cmd:        "python --version",
-			Expected:   "Python 3.6",
-			Repository: "centos",
+			Version:  "36",
+			Cmd:      "python --version",
+			Expected: "Python 3.6",
+			Tag:      "3.6-ubi8",
+			NonAMD:   true,
 		},
 	},
 	"nodejs": {
 		{
-			Version:    "4",
-			Cmd:        "node --version",
-			Expected:   "v4",
-			Repository: "centos",
-		},
-		{
-			Version:    "6",
-			Cmd:        "node --version",
-			Expected:   "v6",
-			Repository: "centos",
+			Version:  "12",
+			Cmd:      "node --version",
+			Expected: "v12",
+			Tag:      "12",
+			NonAMD:   true,
 		},
 	},
 	"perl": {
 		{
-			Version:    "520",
-			Cmd:        "perl --version",
-			Expected:   "v5.20",
-			Repository: "centos",
-		},
-		{
-			Version:    "524",
-			Cmd:        "perl --version",
-			Expected:   "v5.24",
-			Repository: "centos",
+			Version:  "530",
+			Cmd:      "perl --version",
+			Expected: "v5.30",
+			Tag:      "5.30",
+			NonAMD:   true,
 		},
 	},
 	"php": {
 		{
-			Version:    "56",
-			Cmd:        "php --version",
-			Expected:   "5.6",
-			Repository: "centos",
+			Version:  "72",
+			Cmd:      "php --version",
+			Expected: "7.2",
+			Tag:      "7.2-ubi8",
+			NonAMD:   true,
 		},
 		{
-			Version:    "70",
-			Cmd:        "php --version",
-			Expected:   "7.0",
-			Repository: "centos",
+			Version:  "73",
+			Cmd:      "php --version",
+			Expected: "7.3",
+			Tag:      "7.3",
+			NonAMD:   true,
 		},
 	},
 }
@@ -125,8 +107,5 @@ func GetTestCaseForImages() map[string][]tc {
 
 // resolveDockerImageReferences resolves the pull specs for all images
 func resolveDockerImageReference(name string, t *tc) {
-	if len(t.Repository) == 0 {
-		t.Repository = "openshift"
-	}
-	t.DockerImageReference = fmt.Sprintf("%s/%s-%s-centos7", t.Repository, name, t.Version)
+	t.DockerImageReference = fmt.Sprintf("image-registry.openshift-image-registry.svc:5000/openshift/%s:%s", name, t.Tag)
 }

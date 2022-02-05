@@ -1,24 +1,24 @@
 package builds
 
 import (
+	"context"
 	"fmt"
 	"time"
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	e2e "k8s.io/kubernetes/test/e2e/framework"
-
 	imageeco "github.com/openshift/origin/test/extended/image_ecosystem"
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-var _ = g.Describe("[Feature:Builds][Slow] builds with a context directory", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds][Slow] builds with a context directory", func() {
 	defer g.GinkgoRecover()
 	var (
 		appFixture            = exutil.FixturePath("testdata", "builds", "test-context-build.json")
-		oc                    = exutil.NewCLI("contextdir", exutil.KubeConfigPath())
+		oc                    = exutil.NewCLI("contextdir")
 		s2iBuildConfigName    = "s2icontext"
 		s2iBuildName          = "s2icontext-1"
 		dcName                = "frontend"
@@ -69,7 +69,7 @@ var _ = g.Describe("[Feature:Builds][Slow] builds with a context directory", fun
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for endpoint")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), serviceName)
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), serviceName)
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				assertPageContent := func(content string) {
@@ -85,7 +85,7 @@ var _ = g.Describe("[Feature:Builds][Slow] builds with a context directory", fun
 				assertPageContent("Hello world!")
 
 				g.By("checking the pod count")
-				pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(metav1.ListOptions{LabelSelector: dcLabel.String()})
+				pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(context.Background(), metav1.ListOptions{LabelSelector: dcLabel.String()})
 				o.Expect(err).NotTo(o.HaveOccurred())
 				o.Expect(len(pods.Items)).To(o.Equal(1))
 
@@ -103,7 +103,7 @@ var _ = g.Describe("[Feature:Builds][Slow] builds with a context directory", fun
 				repo, err := exutil.NewGitRepo("contextdir")
 				o.Expect(err).NotTo(o.HaveOccurred())
 				defer repo.Remove()
-				err = repo.AddAndCommit("2.3/Dockerfile", "FROM busybox")
+				err = repo.AddAndCommit("2.3/Dockerfile", fmt.Sprintf("FROM %s", image.ShellImage()))
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				exutil.WaitForOpenShiftNamespaceImageStreams(oc)

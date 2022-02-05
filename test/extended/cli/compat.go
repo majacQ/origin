@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"time"
 
 	"github.com/MakeNowJust/heredoc"
@@ -12,11 +13,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	exutil "github.com/openshift/origin/test/extended/util"
+	"github.com/openshift/origin/test/extended/util/image"
 )
 
 func cliPod(cli *exutil.CLI, shell string) *kapiv1.Pod {
-	cliImage, _ := exutil.FindCLIImage(cli)
-
 	return &kapiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cli-test",
@@ -26,7 +26,7 @@ func cliPod(cli *exutil.CLI, shell string) *kapiv1.Pod {
 			Containers: []kapiv1.Container{
 				{
 					Name:    "test",
-					Image:   cliImage,
+					Image:   image.ShellImage(),
 					Command: []string{"/bin/bash", "-c", "set -euo pipefail; " + shell},
 					Env: []kapiv1.EnvVar{
 						{
@@ -40,9 +40,7 @@ func cliPod(cli *exutil.CLI, shell string) *kapiv1.Pod {
 	}
 }
 
-func cliPodWithImage(cli *exutil.CLI, image string, shell string) *kapiv1.Pod {
-	cliImage, _ := exutil.FindCLIImage(cli)
-
+func cliPodWithImage(cli *exutil.CLI, shell string) *kapiv1.Pod {
 	return &kapiv1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "cli-test",
@@ -50,48 +48,15 @@ func cliPodWithImage(cli *exutil.CLI, image string, shell string) *kapiv1.Pod {
 		Spec: kapiv1.PodSpec{
 			ServiceAccountName: "builder",
 			RestartPolicy:      kapiv1.RestartPolicyNever,
-			Volumes: []kapiv1.Volume{
-				{
-					Name: "bin",
-					VolumeSource: kapiv1.VolumeSource{
-						EmptyDir: &kapiv1.EmptyDirVolumeSource{},
-					},
-				},
-			},
-			InitContainers: []kapiv1.Container{
-				{
-					Name:    "cli",
-					Image:   cliImage,
-					Command: []string{"/bin/bash", "-c", "set -e; cp /usr/bin/oc /tmp/bin/"},
-					Env: []kapiv1.EnvVar{
-						{
-							Name:  "HOME",
-							Value: "/tmp",
-						},
-					},
-					VolumeMounts: []kapiv1.VolumeMount{
-						{
-							Name:      "bin",
-							MountPath: "/tmp/bin",
-						},
-					},
-				},
-			},
 			Containers: []kapiv1.Container{
 				{
 					Name:    "test",
-					Image:   cliImage,
-					Command: []string{"/bin/bash", "-c", "set -euo pipefail; export PATH=/tmp/bin:$PATH; " + shell},
+					Image:   image.ShellImage(),
+					Command: []string{"/bin/bash", "-c", shell},
 					Env: []kapiv1.EnvVar{
 						{
 							Name:  "HOME",
 							Value: "/tmp",
-						},
-					},
-					VolumeMounts: []kapiv1.VolumeMount{
-						{
-							Name:      "bin",
-							MountPath: "/tmp/bin",
 						},
 					},
 				},
@@ -100,7 +65,7 @@ func cliPodWithImage(cli *exutil.CLI, image string, shell string) *kapiv1.Pod {
 	}
 }
 
-var _ = g.Describe("[Feature:CLI] CLI", func() {
+var _ = g.Describe("[sig-cli] CLI", func() {
 	defer g.GinkgoRecover()
 
 	var oc *exutil.CLI
@@ -112,22 +77,22 @@ var _ = g.Describe("[Feature:CLI] CLI", func() {
 		}
 	})
 
-	oc = exutil.NewCLI("cli", exutil.KubeConfigPath())
+	oc = exutil.NewCLI("cli")
 
 	g.It("can run inside of a busybox container", func() {
 		ns = oc.Namespace()
 		cli := oc.KubeFramework().PodClient()
 
-		_, err := oc.KubeClient().RbacV1().RoleBindings(ns).Create(&rbacv1.RoleBinding{
+		_, err := oc.KubeClient().RbacV1().RoleBindings(ns).Create(context.Background(), &rbacv1.RoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: "edit-for-builder"},
 			RoleRef:    rbacv1.RoleRef{Kind: "ClusterRole", Name: "edit"},
 			Subjects: []rbacv1.Subject{
 				{Kind: "ServiceAccount", Name: "builder"},
 			},
-		})
+		}, metav1.CreateOptions{})
 		o.Expect(err).NotTo(o.HaveOccurred())
 
-		pod := cli.Create(cliPodWithImage(oc, "busybox:latest", heredoc.Docf(`
+		pod := cli.Create(cliPodWithImage(oc, heredoc.Docf(`
 			set -x
 
 			# verify we can make API calls

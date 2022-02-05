@@ -11,7 +11,7 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds][Slow] can use build secrets", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds][Slow] can use build secrets", func() {
 	defer g.GinkgoRecover()
 	var (
 		buildSecretBaseDir     = exutil.FixturePath("testdata", "builds", "build-secrets")
@@ -24,7 +24,7 @@ var _ = g.Describe("[Feature:Builds][Slow] can use build secrets", func() {
 		dockerBuildDockerfile  = filepath.Join(buildSecretBaseDir, "Dockerfile")
 		sourceBuildFixture     = filepath.Join(buildSecretBaseDir, "test-s2i-build.json")
 		sourceBuildBinDir      = filepath.Join(buildSecretBaseDir, "s2i-binary-dir")
-		oc                     = exutil.NewCLI("build-secrets", exutil.KubeConfigPath())
+		oc                     = exutil.NewCLI("build-secrets")
 	)
 
 	g.Context("", func() {
@@ -68,7 +68,7 @@ var _ = g.Describe("[Feature:Builds][Slow] can use build secrets", func() {
 				br.AssertSuccess()
 
 				g.By("getting the image name")
-				image, err := exutil.GetDockerImageReference(oc.ImageClient().Image().ImageStreams(oc.Namespace()), "test", "latest")
+				image, err := exutil.GetDockerImageReference(oc.ImageClient().ImageV1().ImageStreams(oc.Namespace()), "test", "latest")
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("verifying the build sources were available during build and secrets were not present in the output image")
@@ -99,7 +99,7 @@ var _ = g.Describe("[Feature:Builds][Slow] can use build secrets", func() {
 				br.AssertSuccess()
 
 				g.By("getting the image name")
-				image, err := exutil.GetDockerImageReference(oc.ImageClient().Image().ImageStreams(oc.Namespace()), "test", "latest")
+				image, err := exutil.GetDockerImageReference(oc.ImageClient().ImageV1().ImageStreams(oc.Namespace()), "test", "latest")
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("verifying the build sources are present in container output")

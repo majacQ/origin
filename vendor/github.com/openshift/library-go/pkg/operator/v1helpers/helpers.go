@@ -1,36 +1,40 @@
 package v1helpers
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/ghodss/yaml"
-
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
-	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/util/retry"
+
+	"github.com/ghodss/yaml"
 
 	configv1 "github.com/openshift/api/config/v1"
 	operatorv1 "github.com/openshift/api/operator/v1"
 )
 
-func SetOperandVersion(versions *[]configv1.OperandVersion, operandVersion configv1.OperandVersion) {
+// SetOperandVersion sets the new version and returns the previous value.
+func SetOperandVersion(versions *[]configv1.OperandVersion, operandVersion configv1.OperandVersion) string {
 	if versions == nil {
 		versions = &[]configv1.OperandVersion{}
 	}
 	existingVersion := FindOperandVersion(*versions, operandVersion.Name)
 	if existingVersion == nil {
 		*versions = append(*versions, operandVersion)
-		return
+		return ""
 	}
+
+	previous := existingVersion.Version
 	existingVersion.Version = operandVersion.Version
+	return previous
 }
 
 func FindOperandVersion(versions []configv1.OperandVersion, name string) *configv1.OperandVersion {
@@ -106,33 +110,6 @@ func IsOperatorConditionPresentAndEqual(conditions []operatorv1.OperatorConditio
 	return false
 }
 
-func EnsureOperatorConfigExists(client dynamic.Interface, operatorConfigBytes []byte, gvr schema.GroupVersionResource) {
-	configJson, err := yaml.YAMLToJSON(operatorConfigBytes)
-	if err != nil {
-		panic(err)
-	}
-	operatorConfigObj, err := runtime.Decode(unstructured.UnstructuredJSONScheme, configJson)
-	if err != nil {
-		panic(err)
-	}
-
-	requiredOperatorConfig, ok := operatorConfigObj.(*unstructured.Unstructured)
-	if !ok {
-		panic(fmt.Sprintf("unexpected object in %t", operatorConfigObj))
-	}
-
-	_, err = client.Resource(gvr).Get(requiredOperatorConfig.GetName(), metav1.GetOptions{})
-	if errors.IsNotFound(err) {
-		if _, err := client.Resource(gvr).Create(requiredOperatorConfig, metav1.CreateOptions{}); err != nil {
-			panic(err)
-		}
-		return
-	}
-	if err != nil {
-		panic(err)
-	}
-}
-
 // UpdateOperatorSpecFunc is a func that mutates an operator spec.
 type UpdateOperatorSpecFunc func(spec *operatorv1.OperatorSpec) error
 
@@ -194,6 +171,8 @@ func UpdateStatus(client OperatorClient, updateFuncs ...UpdateStatusFunc) (*oper
 		}
 
 		if equality.Semantic.DeepEqual(oldStatus, newStatus) {
+			// We return the newStatus which is a deep copy of oldStatus but with all update funcs applied.
+			updatedOperatorStatus = newStatus
 			return nil
 		}
 
@@ -285,4 +264,86 @@ func (agg aggregate) Error() string {
 // Errors is part of the Aggregate interface.
 func (agg aggregate) Errors() []error {
 	return []error(agg)
+}
+
+// Is is part of the Aggregate interface
+func (agg aggregate) Is(target error) bool {
+	return agg.visit(func(err error) bool {
+		return errors.Is(err, target)
+	})
+}
+
+func (agg aggregate) visit(f func(err error) bool) bool {
+	for _, err := range agg {
+		switch err := err.(type) {
+		case aggregate:
+			if match := err.visit(f); match {
+				return match
+			}
+		case utilerrors.Aggregate:
+			for _, nestedErr := range err.Errors() {
+				if match := f(nestedErr); match {
+					return match
+				}
+			}
+		default:
+			if match := f(err); match {
+				return match
+			}
+		}
+	}
+
+	return false
+}
+
+// MapToEnvVars converts a string-string map to a slice of corev1.EnvVar-s
+func MapToEnvVars(mapEnvVars map[string]string) []corev1.EnvVar {
+	if mapEnvVars == nil {
+		return nil
+	}
+
+	envVars := make([]corev1.EnvVar, len(mapEnvVars))
+	i := 0
+	for k, v := range mapEnvVars {
+		envVars[i] = corev1.EnvVar{Name: k, Value: v}
+		i++
+	}
+
+	// need to sort the slice so that kube-controller-manager-pod configmap does not change all the time
+	sort.Slice(envVars, func(i, j int) bool { return envVars[i].Name < envVars[j].Name })
+	return envVars
+}
+
+// InjectObservedProxyIntoContainers injects proxy environment variables in containers specified in containerNames.
+func InjectObservedProxyIntoContainers(podSpec *corev1.PodSpec, containerNames []string, observedConfig []byte, fields ...string) error {
+	var config map[string]interface{}
+	if err := yaml.Unmarshal(observedConfig, &config); err != nil {
+		return fmt.Errorf("failed to unmarshal the observedConfig: %w", err)
+	}
+
+	proxyConfig, found, err := unstructured.NestedStringMap(config, fields...)
+	if err != nil {
+		return fmt.Errorf("couldn't get the proxy config from observedConfig: %w", err)
+	}
+
+	proxyEnvVars := MapToEnvVars(proxyConfig)
+	if !found || len(proxyEnvVars) < 1 {
+		// There's no observed proxy config, we should tolerate that
+		return nil
+	}
+
+	for _, containerName := range containerNames {
+		for i := range podSpec.InitContainers {
+			if podSpec.InitContainers[i].Name == containerName {
+				podSpec.InitContainers[i].Env = append(podSpec.InitContainers[i].Env, proxyEnvVars...)
+			}
+		}
+		for i := range podSpec.Containers {
+			if podSpec.Containers[i].Name == containerName {
+				podSpec.Containers[i].Env = append(podSpec.Containers[i].Env, proxyEnvVars...)
+			}
+		}
+	}
+
+	return nil
 }

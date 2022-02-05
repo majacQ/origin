@@ -159,6 +159,7 @@ const (
 	SpecComponentTypeAfterSuite
 	SpecComponentTypeBeforeEach
 	SpecComponentTypeJustBeforeEach
+	SpecComponentTypeJustAfterEach
 	SpecComponentTypeAfterEach
 	SpecComponentTypeIt
 	SpecComponentTypeMeasure
@@ -171,13 +172,3 @@ const (
 	FlagTypeFocused
 	FlagTypePending
 )
-
-type TestNode interface {
-	Type() SpecComponentType
-	CodeLocation() CodeLocation
-
-	Text() string
-	SetText(text string)
-	Flag() FlagType
-	SetFlag(flag FlagType)
-}

@@ -105,6 +105,7 @@ type IdentityProvider struct {
 	// mappingMethod determines how identities from this provider are mapped to users
 	MappingMethod string `json:"mappingMethod"`
 	// provider contains the information about how to set up a specific identity provider
+	// +kubebuilder:pruning:PreserveUnknownFields
 	Provider runtime.RawExtension `json:"provider"`
 }
 
@@ -391,20 +392,43 @@ type SessionConfig struct {
 // TokenConfig holds the necessary configuration options for authorization and access tokens
 type TokenConfig struct {
 	// authorizeTokenMaxAgeSeconds defines the maximum age of authorize tokens
-	AuthorizeTokenMaxAgeSeconds int32 `json:"authorizeTokenMaxAgeSeconds"`
+	AuthorizeTokenMaxAgeSeconds int32 `json:"authorizeTokenMaxAgeSeconds,omitempty"`
 	// accessTokenMaxAgeSeconds defines the maximum age of access tokens
-	AccessTokenMaxAgeSeconds int32 `json:"accessTokenMaxAgeSeconds"`
-	// accessTokenInactivityTimeoutSeconds defined the default token
-	// inactivity timeout for tokens granted by any client.
-	// Setting it to nil means the feature is completely disabled (default)
-	// The default setting can be overriden on OAuthClient basis.
+	AccessTokenMaxAgeSeconds int32 `json:"accessTokenMaxAgeSeconds,omitempty"`
+	// accessTokenInactivityTimeoutSeconds - DEPRECATED: setting this field has no effect.
+	// +optional
+	AccessTokenInactivityTimeoutSeconds *int32 `json:"accessTokenInactivityTimeoutSeconds,omitempty"`
+	// accessTokenInactivityTimeout defines the token inactivity timeout
+	// for tokens granted by any client.
 	// The value represents the maximum amount of time that can occur between
 	// consecutive uses of the token. Tokens become invalid if they are not
 	// used within this temporal window. The user will need to acquire a new
-	// token to regain access once a token times out.
-	// Valid values are:
-	// - 0: Tokens never time out
-	// - X: Tokens time out if there is no activity for X seconds
-	// The current minimum allowed value for X is 300 (5 minutes)
-	AccessTokenInactivityTimeoutSeconds *int32 `json:"accessTokenInactivityTimeoutSeconds,omitempty"`
+	// token to regain access once a token times out. Takes valid time
+	// duration string such as "5m", "1.5h" or "2h45m". The minimum allowed
+	// value for duration is 300s (5 minutes). If the timeout is configured
+	// per client, then that value takes precedence. If the timeout value is
+	// not specified and the client does not override the value, then tokens
+	// are valid until their lifetime.
+	// +optional
+	AccessTokenInactivityTimeout *metav1.Duration `json:"accessTokenInactivityTimeout,omitempty"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// SessionSecrets list the secrets to use to sign/encrypt and authenticate/decrypt created sessions.
+type SessionSecrets struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// Secrets is a list of secrets
+	// New sessions are signed and encrypted using the first secret.
+	// Existing sessions are decrypted/authenticated by each secret until one succeeds. This allows rotating secrets.
+	Secrets []SessionSecret `json:"secrets"`
+}
+
+// SessionSecret is a secret used to authenticate/decrypt cookie-based sessions
+type SessionSecret struct {
+	// Authentication is used to authenticate sessions using HMAC. Recommended to use a secret with 32 or 64 bytes.
+	Authentication string `json:"authentication"`
+	// Encryption is used to encrypt sessions. Must be 16, 24, or 32 characters long, to select AES-128, AES-
+	Encryption string `json:"encryption"`
 }

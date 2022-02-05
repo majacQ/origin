@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/openshift/origin/pkg/version"
 )
 
 // The below types are directly marshalled into XML. The types correspond to jUnit
@@ -115,15 +117,22 @@ const (
 	TestResultFail TestResult = "fail"
 )
 
-func writeJUnitReport(name string, tests []*testCase, dir string, duration time.Duration, errOut io.Writer, additionalResults ...*JUnitTestCase) error {
+func writeJUnitReport(filePrefix, name string, tests []*testCase, dir string, duration time.Duration, errOut io.Writer, additionalResults ...*JUnitTestCase) error {
 	s := &JUnitTestSuite{
 		Name:     name,
 		Duration: duration.Seconds(),
+		Properties: []*TestSuiteProperty{
+			{
+				Name:  "TestVersion",
+				Value: version.Get().String(),
+			},
+		},
 	}
 	for _, test := range tests {
 		switch {
 		case test.skipped:
 			s.NumTests++
+			s.NumSkipped++
 			s.TestCases = append(s.TestCases, &JUnitTestCase{
 				Name:      test.name,
 				SystemOut: string(test.out),
@@ -134,7 +143,7 @@ func writeJUnitReport(name string, tests []*testCase, dir string, duration time.
 			})
 		case test.failed:
 			s.NumTests++
-			s.NumSkipped++
+			s.NumFailed++
 			s.TestCases = append(s.TestCases, &JUnitTestCase{
 				Name:      test.name,
 				SystemOut: string(test.out),
@@ -144,8 +153,19 @@ func writeJUnitReport(name string, tests []*testCase, dir string, duration time.
 				},
 			})
 		case test.success:
+			if test.flake {
+				s.NumTests++
+				s.NumFailed++
+				s.TestCases = append(s.TestCases, &JUnitTestCase{
+					Name:      test.name,
+					SystemOut: string(test.out),
+					Duration:  test.duration.Seconds(),
+					FailureOutput: &FailureOutput{
+						Output: lastLinesUntil(string(test.out), 100, "flake:"),
+					},
+				})
+			}
 			s.NumTests++
-			s.NumFailed++
 			s.TestCases = append(s.TestCases, &JUnitTestCase{
 				Name:     test.name,
 				Duration: test.duration.Seconds(),
@@ -166,7 +186,7 @@ func writeJUnitReport(name string, tests []*testCase, dir string, duration time.
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, fmt.Sprintf("junit_e2e_%s.xml", time.Now().UTC().Format("20060102-150405")))
+	path := filepath.Join(dir, fmt.Sprintf("%s_%s.xml", filePrefix, time.Now().UTC().Format("20060102-150405")))
 	fmt.Fprintf(errOut, "Writing JUnit report to %s\n\n", path)
 	return ioutil.WriteFile(path, out, 0640)
 }

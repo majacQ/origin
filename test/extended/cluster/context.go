@@ -17,10 +17,17 @@ const (
 type ContextType struct {
 	ClusterLoader struct {
 		Cleanup    bool
+		Threads    int
 		Projects   []ClusterLoaderType
 		Sync       SyncObjectType  `yaml:",omitempty"`
 		TuningSets []TuningSetType `yaml:",omitempty"`
 	}
+}
+
+type ProjectMeta struct {
+	Counter int
+	ClusterLoaderType
+	ViperConfig string
 }
 
 // ClusterLoaderType struct only used for Cluster Loader test config
@@ -99,13 +106,13 @@ type ServiceInfo struct {
 // ParseConfig will complete flag parsing as well as viper tasks
 func ParseConfig(config string, isFixture bool) error {
 	// This must be done after common flags are registered, since Viper is a flag option.
-	if isFixture {
+	if filepath.IsAbs(config) || isFixture {
 		dir, file := filepath.Split(config)
 		s := strings.Split(file, ".")
 		viper.SetConfigName(s[0])
 		viper.AddConfigPath(dir)
 	} else {
-		viper.SetConfigName(config)
+		viper.SetConfigName(cleanConfigName(config))
 		viper.AddConfigPath(".")
 	}
 	err := viper.ReadInConfig()
@@ -114,4 +121,13 @@ func ParseConfig(config string, isFixture bool) error {
 	}
 	viper.Unmarshal(&ConfigContext)
 	return nil
+}
+
+func cleanConfigName(filename string) string {
+	extension := filepath.Ext(filename)
+	if extension != "" {
+		return strings.TrimSuffix(filename, extension)
+	}
+
+	return filename
 }

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -17,15 +18,13 @@ import (
 
 	routev1 "github.com/openshift/api/route/v1"
 	routeclientset "github.com/openshift/client-go/route/clientset/versioned"
-	"github.com/openshift/origin/pkg/oc/lib/routedisplayhelpers"
-	routeapi "github.com/openshift/origin/pkg/route/apis/route"
-	routev1conversions "github.com/openshift/origin/pkg/route/apis/route/v1"
+
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
 const changeTimeoutSeconds = 3 * 60
 
-var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
+var _ = g.Describe("[sig-network][Feature:Router]", func() {
 	defer g.GinkgoRecover()
 	var (
 		oc          *exutil.CLI
@@ -38,49 +37,51 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 	g.AfterEach(func() {
 		if g.CurrentGinkgoTestDescription().Failed {
 			client := routeclientset.NewForConfigOrDie(oc.AdminConfig()).RouteV1().Routes(ns)
-			if routes, _ := client.List(metav1.ListOptions{}); routes != nil {
+			if routes, _ := client.List(context.Background(), metav1.ListOptions{}); routes != nil {
 				outputIngress(routes.Items...)
 			}
 			exutil.DumpPodLogsStartingWith("router-", oc)
 		}
 	})
 
-	oc = exutil.NewCLI("router-scoped", exutil.KubeConfigPath())
+	oc = exutil.NewCLI("router-scoped")
 
 	g.BeforeEach(func() {
 		ns = oc.Namespace()
 
-		routerImage, _ = exutil.FindRouterImage(oc)
-		routerImage = strings.Replace(routerImage, "${component}", "haproxy-router", -1)
+		var err error
+		routerImage, err = exutil.FindRouterImage(oc)
+		o.Expect(err).NotTo(o.HaveOccurred())
 
-		configPath := exutil.FixturePath("testdata", "router-common.yaml")
-		err := oc.AsAdmin().Run("new-app").Args("-f", configPath).Execute()
+		configPath := exutil.FixturePath("testdata", "router", "router-common.yaml")
+		err = oc.AsAdmin().Run("new-app").Args("-f", configPath).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 	})
 
 	g.Describe("The HAProxy router", func() {
 		g.It("should serve the correct routes when scoped to a single namespace and label set", func() {
 
-			configPath := exutil.FixturePath("testdata", "router-scoped.yaml")
+			configPath := exutil.FixturePath("testdata", "router", "router-scoped.yaml")
 			g.By(fmt.Sprintf("creating a router from a config file %q", configPath))
 			err := oc.AsAdmin().Run("new-app").Args("-f", configPath, "-p", "IMAGE="+routerImage).Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			ns := oc.KubeFramework().Namespace.Name
-			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
+			}()
 
 			var routerIP string
 			err = wait.Poll(time.Second, changeTimeoutSeconds*time.Second, func() (bool, error) {
-				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(oc.KubeFramework().Namespace.Name).Get("router-scoped", metav1.GetOptions{})
+				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(oc.KubeFramework().Namespace.Name).Get(context.Background(), "router-scoped", metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
-				if len(pod.Status.PodIP) == 0 {
-					return false, nil
-				}
 				routerIP = pod.Status.PodIP
-				return true, nil
+				podIsReady := podConditionStatus(pod, corev1.PodReady)
+
+				return len(routerIP) != 0 && podIsReady == corev1.ConditionTrue, nil
 			})
 			o.Expect(err).NotTo(o.HaveOccurred())
 
@@ -89,42 +90,43 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 
 			g.By("waiting for the healthz endpoint to respond")
 			healthzURI := fmt.Sprintf("http://%s:1936/healthz", routerIP)
-			err = waitForRouterOKResponseExec(ns, execPodName, healthzURI, routerIP, changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, healthzURI, routerIP, changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for the valid route to respond")
-			err = waitForRouterOKResponseExec(ns, execPodName, routerURL+"/Letter", "FIRST.example.com", changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, routerURL+"/Letter", "FIRST.example.com", changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			for _, host := range []string{"second.example.com", "third.example.com"} {
 				g.By(fmt.Sprintf("checking that %s does not match a route", host))
-				err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusServiceUnavailable)
+				err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusServiceUnavailable)
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 		})
 
 		g.It("should override the route host with a custom value", func() {
 
-			configPath := exutil.FixturePath("testdata", "router-override.yaml")
+			configPath := exutil.FixturePath("testdata", "router", "router-override.yaml")
 			g.By(fmt.Sprintf("creating a router from a config file %q", configPath))
 			err := oc.AsAdmin().Run("new-app").Args("-f", configPath, "-p", "IMAGE="+routerImage).Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			ns := oc.KubeFramework().Namespace.Name
-			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
+			}()
 
 			var routerIP string
 			err = wait.Poll(time.Second, changeTimeoutSeconds*time.Second, func() (bool, error) {
-				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(ns).Get("router-override", metav1.GetOptions{})
+				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(ns).Get(context.Background(), "router-override", metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
-				if len(pod.Status.PodIP) == 0 {
-					return false, nil
-				}
 				routerIP = pod.Status.PodIP
-				return true, nil
+				podIsReady := podConditionStatus(pod, corev1.PodReady)
+
+				return len(routerIP) != 0 && podIsReady == corev1.ConditionTrue, nil
 			})
 
 			o.Expect(err).NotTo(o.HaveOccurred())
@@ -135,64 +137,62 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 
 			g.By("waiting for the healthz endpoint to respond")
 			healthzURI := fmt.Sprintf("http://%s:1936/healthz", routerIP)
-			err = waitForRouterOKResponseExec(ns, execPodName, healthzURI, routerIP, changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, healthzURI, routerIP, changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for the valid route to respond")
-			err = waitForRouterOKResponseExec(ns, execPodName, routerURL+"/Letter", fmt.Sprintf(pattern, "route-1", ns), changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, routerURL+"/Letter", fmt.Sprintf(pattern, "route-1", ns), changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("checking that the stored domain name does not match a route")
 			host := "first.example.com"
-			err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusServiceUnavailable)
+			err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusServiceUnavailable)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			for _, host := range []string{"route-1", "route-2"} {
 				host = fmt.Sprintf(pattern, host, ns)
 				g.By(fmt.Sprintf("checking that %s matches a route", host))
-				err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusOK)
+				err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusOK)
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 
 			g.By("checking that the router reported the correct ingress and override")
-			r, err := oc.RouteClient().Route().Routes(ns).Get("route-1", metav1.GetOptions{})
+			r, err := oc.RouteClient().RouteV1().Routes(ns).Get(context.Background(), "route-1", metav1.GetOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			ingress := ingressForName(r, "test-override")
 			e2e.Logf("Selected: %#v, All: %#v", ingress, r.Status.Ingress)
 			o.Expect(ingress).NotTo(o.BeNil())
 			o.Expect(ingress.Host).To(o.Equal(fmt.Sprintf(pattern, "route-1", ns)))
-			external := routev1.RouteIngress{}
-			err = routev1conversions.Convert_route_RouteIngress_To_v1_RouteIngress(ingress, &external, nil)
-			o.Expect(err).NotTo(o.HaveOccurred())
-			status, condition := routedisplayhelpers.IngressConditionStatus(&external, routev1.RouteAdmitted)
+			status, condition := IngressConditionStatus(ingress, routev1.RouteAdmitted)
 			o.Expect(status).To(o.Equal(corev1.ConditionTrue))
 			o.Expect(condition.LastTransitionTime).NotTo(o.BeNil())
 		})
 
 		g.It("should override the route host for overridden domains with a custom value", func() {
 
-			configPath := exutil.FixturePath("testdata", "router-override-domains.yaml")
+			configPath := exutil.FixturePath("testdata", "router", "router-override-domains.yaml")
 			g.By(fmt.Sprintf("creating a router from a config file %q", configPath))
 			err := oc.AsAdmin().Run("new-app").Args("-f", configPath, "-p", "IMAGE="+routerImage).Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			ns := oc.KubeFramework().Namespace.Name
-			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			execPod := exutil.CreateExecPodOrFail(oc.AdminKubeClient(), ns, "execpod")
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPod.Name, *metav1.NewDeleteOptions(1))
+			}()
 
 			g.By(fmt.Sprintf("creating a scoped router with overridden domains from a config file %q", configPath))
 
 			var routerIP string
 			err = wait.Poll(time.Second, changeTimeoutSeconds*time.Second, func() (bool, error) {
-				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(ns).Get("router-override-domains", metav1.GetOptions{})
+				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(ns).Get(context.Background(), "router-override-domains", metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
-				if len(pod.Status.PodIP) == 0 {
-					return false, nil
-				}
 				routerIP = pod.Status.PodIP
-				return true, nil
+				podIsReady := podConditionStatus(pod, corev1.PodReady)
+
+				return len(routerIP) != 0 && podIsReady == corev1.ConditionTrue, nil
 			})
 
 			o.Expect(err).NotTo(o.HaveOccurred())
@@ -203,35 +203,32 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 
 			g.By("waiting for the healthz endpoint to respond")
 			healthzURI := fmt.Sprintf("http://%s:1936/healthz", routerIP)
-			err = waitForRouterOKResponseExec(ns, execPodName, healthzURI, routerIP, changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, healthzURI, routerIP, changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("waiting for the valid route to respond")
-			err = waitForRouterOKResponseExec(ns, execPodName, routerURL+"/Letter", fmt.Sprintf(pattern, "route-override-domain-1", ns), changeTimeoutSeconds)
+			err = waitForRouterOKResponseExec(ns, execPod.Name, routerURL+"/Letter", fmt.Sprintf(pattern, "route-override-domain-1", ns), changeTimeoutSeconds)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("checking that the stored domain name does not match a route")
 			host := "y.a.null.ptr"
-			err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusServiceUnavailable)
+			err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusServiceUnavailable)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			for _, host := range []string{"route-override-domain-1", "route-override-domain-2"} {
 				host = fmt.Sprintf(pattern, host, ns)
 				g.By(fmt.Sprintf("checking that %s matches a route", host))
-				err = expectRouteStatusCodeExec(ns, execPodName, routerURL+"/Letter", host, http.StatusOK)
+				err = expectRouteStatusCodeExec(ns, execPod.Name, routerURL+"/Letter", host, http.StatusOK)
 				o.Expect(err).NotTo(o.HaveOccurred())
 			}
 
 			g.By("checking that the router reported the correct ingress and override")
-			r, err := oc.RouteClient().Route().Routes(ns).Get("route-override-domain-2", metav1.GetOptions{})
+			r, err := oc.RouteClient().RouteV1().Routes(ns).Get(context.Background(), "route-override-domain-2", metav1.GetOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			ingress := ingressForName(r, "test-override-domains")
 			o.Expect(ingress).NotTo(o.BeNil())
 			o.Expect(ingress.Host).To(o.Equal(fmt.Sprintf(pattern, "route-override-domain-2", ns)))
-			external := routev1.RouteIngress{}
-			err = routev1conversions.Convert_route_RouteIngress_To_v1_RouteIngress(ingress, &external, nil)
-			o.Expect(err).NotTo(o.HaveOccurred())
-			status, condition := routedisplayhelpers.IngressConditionStatus(&external, routev1.RouteAdmitted)
+			status, condition := IngressConditionStatus(ingress, routev1.RouteAdmitted)
 			o.Expect(status).To(o.Equal(corev1.ConditionTrue))
 			o.Expect(condition.LastTransitionTime).NotTo(o.BeNil())
 		})
@@ -241,22 +238,31 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 func waitForRouterOKResponseExec(ns, execPodName, url, host string, timeoutSeconds int) error {
 	cmd := fmt.Sprintf(`
 		set -e
-		for i in $(seq 1 %d); do
-			code=$( curl -k -s -o /dev/null -w '%%{http_code}\n' --header 'Host: %s' %q ) || rc=$?
+		pass=%[4]d
+		STOP=$(($(date '+%%s') + %[1]d))
+		while [ $(date '+%%s') -lt $STOP ]; do
+			rc=0
+			code=$( curl -k -s -m 5 -o /dev/null -w '%%{http_code}\n' --header 'Host: %[2]s' %[3]q ) || rc=$?
 			if [[ "${rc:-0}" -eq 0 ]]; then
 				echo $code
 				if [[ $code -eq 200 ]]; then
-					exit 0
+					pass=$(( pass - 1 ))
+					if [[ $pass -le 0 ]]; then
+						exit 0
+					fi
+					sleep 1
+					continue
 				fi
 				if [[ $code -ne 503 ]]; then
 					exit 1
 				fi
+				pass=%[4]d
 			else
 				echo "error ${rc}" 1>&2
 			fi
 			sleep 1
 		done
-		`, timeoutSeconds, host, url)
+		`, timeoutSeconds, host, url, 5)
 	output, err := e2e.RunHostCmd(ns, execPodName, cmd)
 	if err != nil {
 		return fmt.Errorf("host command failed: %v\n%s", err, output)
@@ -268,11 +274,19 @@ func waitForRouterOKResponseExec(ns, execPodName, url, host string, timeoutSecon
 	return nil
 }
 
-func expectRouteStatusCodeRepeatedExec(ns, execPodName, url, host string, statusCode int, times int) error {
+func expectRouteStatusCodeRepeatedExec(ns, execPodName, url, host string, statusCode int, times int, proxy bool) error {
+	var extraArgs []string
+	if proxy {
+		extraArgs = append(extraArgs, "--haproxy-protocol")
+	}
+	args := strings.Join(extraArgs, " ")
+
 	cmd := fmt.Sprintf(`
 		set -e
-		for i in $(seq 1 %d); do
-			code=$( curl -s -o /dev/null -w '%%{http_code}\n' --header 'Host: %s' %q ) || rc=$?
+		STOP=$(($(date '+%%s') + %d))
+		while [ $(date '+%%s') -lt $STOP ]; do
+			rc=0
+			code=$( curl %s -s -m 5 -o /dev/null -w '%%{http_code}\n' --header 'Host: %s' %q ) || rc=$?
 			if [[ "${rc:-0}" -eq 0 ]]; then
 				echo $code
 				if [[ $code -ne %d ]]; then
@@ -282,7 +296,7 @@ func expectRouteStatusCodeRepeatedExec(ns, execPodName, url, host string, status
 				echo "error ${rc}" 1>&2
 			fi
 		done
-		`, times, host, url, statusCode)
+		`, times, args, host, url, statusCode)
 	output, err := e2e.RunHostCmd(ns, execPodName, cmd)
 	if err != nil {
 		return fmt.Errorf("host command failed: %v\n%s", err, output)
@@ -311,7 +325,7 @@ func getAuthenticatedRouteURLViaPod(ns, execPodName, url, host, user, pass strin
 	return output, nil
 }
 
-func ingressForName(r *routeapi.Route, name string) *routeapi.RouteIngress {
+func ingressForName(r *routev1.Route, name string) *routev1.RouteIngress {
 	for i, ingress := range r.Status.Ingress {
 		if ingress.RouterName == name {
 			return &r.Status.Ingress[i]

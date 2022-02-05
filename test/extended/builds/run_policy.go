@@ -1,6 +1,7 @@
 package builds
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -8,20 +9,32 @@ import (
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 
 	buildv1 "github.com/openshift/api/build/v1"
-	buildclient "github.com/openshift/origin/pkg/build/client"
-	buildutil "github.com/openshift/origin/pkg/build/util"
+	buildclientv1 "github.com/openshift/client-go/build/clientset/versioned/typed/build/v1"
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy", func() {
+func hasConditionState(build *buildv1.Build, condition buildv1.BuildPhase, expectedStatus bool) bool {
+	for _, c := range build.Status.Conditions {
+		if c.Type == buildv1.BuildConditionType(condition) {
+			if (expectedStatus && c.Status == corev1.ConditionTrue) ||
+				(!expectedStatus && c.Status == corev1.ConditionFalse) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var _ = g.Describe("[sig-builds][Feature:Builds][Slow] using build configuration runPolicy", func() {
 	defer g.GinkgoRecover()
 	var (
 		// Use invalid source here as we don't care about the result
-		oc = exutil.NewCLI("cli-build-run-policy", exutil.KubeConfigPath())
+		oc = exutil.NewCLI("cli-build-run-policy")
 	)
 
 	g.Context("", func() {
@@ -51,8 +64,8 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 				)
 				bcName := "sample-parallel-build"
 
-				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(metav1.ListOptions{
-					LabelSelector: buildutil.BuildConfigSelector(bcName).String(),
+				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(context.Background(), metav1.ListOptions{
+					LabelSelector: BuildConfigSelector(bcName).String(),
 				})
 				defer buildWatch.Stop()
 
@@ -67,7 +80,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 				for {
 					event := <-buildWatch.ResultChan()
 					build := event.Object.(*buildv1.Build)
-					o.Expect(buildutil.IsBuildComplete(build)).Should(o.BeFalse())
+					o.Expect(IsBuildComplete(build)).Should(o.BeFalse())
 					if build.Name == startedBuilds[0] && build.Status.Phase == buildv1.BuildPhaseRunning {
 						break
 					}
@@ -86,7 +99,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					event := <-buildWatch.ResultChan()
 					build := event.Object.(*buildv1.Build)
 					if build.Name == startedBuilds[0] {
-						if buildutil.IsBuildComplete(build) {
+						if IsBuildComplete(build) {
 							break
 						}
 						continue
@@ -98,10 +111,11 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					// TODO: This might introduce flakes in case the first build complete
 					// sooner or fail.
 					if build.Status.Phase == buildv1.BuildPhasePending {
-						c := buildclient.NewClientBuildLister(oc.BuildClient().BuildV1())
+						o.Expect(hasConditionState(build, buildv1.BuildPhasePending, true)).Should(o.BeTrue())
 						firstBuildRunning := false
-						_, err := buildutil.BuildConfigBuilds(c, oc.Namespace(), bcName, func(b *buildv1.Build) bool {
+						_, err := BuildConfigBuilds(oc.BuildClient().BuildV1(), oc.Namespace(), bcName, func(b *buildv1.Build) bool {
 							if b.Name == startedBuilds[0] && b.Status.Phase == buildv1.BuildPhaseRunning {
+								o.Expect(hasConditionState(b, buildv1.BuildPhaseRunning, true)).Should(o.BeTrue())
 								firstBuildRunning = true
 							}
 							return false
@@ -111,7 +125,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 						counter++
 					}
 					// When the build failed or completed prematurely, fail the test
-					o.Expect(buildutil.IsBuildComplete(build)).Should(o.BeFalse())
+					o.Expect(IsBuildComplete(build)).Should(o.BeFalse())
 					if counter == 2 {
 						break
 					}
@@ -137,8 +151,8 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					startedBuilds = append(startedBuilds, strings.TrimSpace(strings.Split(stdout, "/")[1]))
 				}
 
-				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(metav1.ListOptions{
-					LabelSelector: buildutil.BuildConfigSelector(bcName).String(),
+				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(context.Background(), metav1.ListOptions{
+					LabelSelector: BuildConfigSelector(bcName).String(),
 				})
 				defer buildWatch.Stop()
 				o.Expect(err).NotTo(o.HaveOccurred())
@@ -149,12 +163,20 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					build := event.Object.(*buildv1.Build)
 					var lastCompletion time.Time
 					if build.Status.Phase == buildv1.BuildPhaseComplete {
+						o.Expect(hasConditionState(build, buildv1.BuildPhaseComplete, true)).Should(o.BeTrue())
 						lastCompletion = time.Now()
 						o.Expect(build.Status.StartTimestamp).ToNot(o.BeNil(), "completed builds should have a valid start time")
 						o.Expect(build.Status.CompletionTimestamp).ToNot(o.BeNil(), "completed builds should have a valid completion time")
 						sawCompletion = true
 					}
 					if build.Status.Phase == buildv1.BuildPhaseRunning || build.Status.Phase == buildv1.BuildPhasePending {
+						if build.Status.Phase == buildv1.BuildPhaseRunning {
+							o.Expect(hasConditionState(build, buildv1.BuildPhaseRunning, true)).Should(o.BeTrue())
+						}
+						if build.Status.Phase == buildv1.BuildPhasePending {
+							o.Expect(hasConditionState(build, buildv1.BuildPhasePending, true)).Should(o.BeTrue())
+						}
+
 						latency := lastCompletion.Sub(time.Now())
 						o.Expect(latency).To(o.BeNumerically("<", 20*time.Second), "next build should have started less than 20s after last completed build")
 
@@ -165,8 +187,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 						}
 						// Verify there are no other running or pending builds than this
 						// build as serial build always runs alone.
-						c := buildclient.NewClientBuildLister(oc.BuildClient().BuildV1())
-						builds, err := buildutil.BuildConfigBuilds(c, oc.Namespace(), bcName, func(b *buildv1.Build) bool {
+						builds, err := BuildConfigBuilds(oc.BuildClient().BuildV1(), oc.Namespace(), bcName, func(b *buildv1.Build) bool {
 							if b.Name == build.Name {
 								return false
 							}
@@ -188,7 +209,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 						break
 					}
 				}
-				o.Expect(sawCompletion).To(o.BeTrue(), "should have seen at least one build complete")
+				o.Expect(sawCompletion).Should(o.BeTrue(), "should have seen at least one build complete")
 			})
 		})
 
@@ -202,8 +223,8 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					o.Expect(err).NotTo(o.HaveOccurred())
 				}
 
-				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(metav1.ListOptions{
-					LabelSelector: buildutil.BuildConfigSelector(bcName).String(),
+				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(context.Background(), metav1.ListOptions{
+					LabelSelector: BuildConfigSelector(bcName).String(),
 				})
 				defer buildWatch.Stop()
 				o.Expect(err).NotTo(o.HaveOccurred())
@@ -212,7 +233,13 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 				for {
 					event := <-buildWatch.ResultChan()
 					build := event.Object.(*buildv1.Build)
-					if build.Status.Phase == buildv1.BuildPhasePending {
+					if build.Status.Phase == buildv1.BuildPhasePending || build.Status.Phase == buildv1.BuildPhaseRunning {
+						if build.Status.Phase == buildv1.BuildPhaseRunning {
+							o.Expect(hasConditionState(build, buildv1.BuildPhaseRunning, true)).Should(o.BeTrue())
+						}
+						if build.Status.Phase == buildv1.BuildPhasePending {
+							o.Expect(hasConditionState(build, buildv1.BuildPhasePending, true)).Should(o.BeTrue())
+						}
 						if build.Name == "sample-serial-build-1" {
 							err := oc.Run("cancel-build").Args("sample-serial-build-1").Execute()
 							o.Expect(err).ToNot(o.HaveOccurred())
@@ -245,8 +272,8 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					o.Expect(err).NotTo(o.HaveOccurred())
 				}
 
-				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(metav1.ListOptions{
-					LabelSelector: buildutil.BuildConfigSelector(bcName).String(),
+				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(context.Background(), metav1.ListOptions{
+					LabelSelector: BuildConfigSelector(bcName).String(),
 				})
 				defer buildWatch.Stop()
 				o.Expect(err).NotTo(o.HaveOccurred())
@@ -259,6 +286,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					case event := <-buildWatch.ResultChan():
 						build := event.Object.(*buildv1.Build)
 						if build.Status.Phase == buildv1.BuildPhasePending {
+							o.Expect(hasConditionState(build, buildv1.BuildPhasePending, true)).Should(o.BeTrue())
 							if build.Name == "sample-serial-build-fail-2" {
 								duration := time.Now().Sub(failTime)
 								o.Expect(duration).To(o.BeNumerically("<", 20*time.Second), "next build should have started less than 20s after failed build")
@@ -270,6 +298,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 						}
 
 						if build.Status.Phase == buildv1.BuildPhaseFailed {
+							o.Expect(hasConditionState(build, buildv1.BuildPhaseFailed, true)).Should(o.BeTrue())
 							if build.Name == "sample-serial-build-fail-1" {
 								// this may not be set on the first build modified to failed event because
 								// the build gets marked failed by the build pod, but the timestamps get
@@ -307,9 +336,9 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 						done = true
 					}
 				}
-				o.Expect(timestamps1).To(o.BeTrue(), "failed builds should have start and completion timestamps set")
-				o.Expect(timestamps2).To(o.BeTrue(), "failed builds should have start and completion timestamps set")
-				o.Expect(timestamps3).To(o.BeTrue(), "failed builds should have start and completion timestamps set")
+				o.Expect(timestamps1).Should(o.BeTrue(), "failed builds should have start and completion timestamps set")
+				o.Expect(timestamps2).Should(o.BeTrue(), "failed builds should have start and completion timestamps set")
+				o.Expect(timestamps3).Should(o.BeTrue(), "failed builds should have start and completion timestamps set")
 			})
 		})
 
@@ -323,8 +352,8 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					o.Expect(err).NotTo(o.HaveOccurred())
 				}
 
-				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(metav1.ListOptions{
-					LabelSelector: buildutil.BuildConfigSelector(bcName).String(),
+				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(context.Background(), metav1.ListOptions{
+					LabelSelector: BuildConfigSelector(bcName).String(),
 				})
 				defer buildWatch.Stop()
 				o.Expect(err).NotTo(o.HaveOccurred())
@@ -336,7 +365,13 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					select {
 					case event := <-buildWatch.ResultChan():
 						build := event.Object.(*buildv1.Build)
-						if build.Status.Phase == buildv1.BuildPhasePending {
+						if build.Status.Phase == buildv1.BuildPhasePending || build.Status.Phase == buildv1.BuildPhaseRunning {
+							if build.Status.Phase == buildv1.BuildPhaseRunning {
+								o.Expect(hasConditionState(build, buildv1.BuildPhaseRunning, true)).Should(o.BeTrue())
+							}
+							if build.Status.Phase == buildv1.BuildPhasePending {
+								o.Expect(hasConditionState(build, buildv1.BuildPhasePending, true)).Should(o.BeTrue())
+							}
 							if build.Name == "sample-serial-build-1" {
 								err := oc.Run("delete").Args("build", "sample-serial-build-1", "--ignore-not-found").Execute()
 								o.Expect(err).ToNot(o.HaveOccurred())
@@ -376,8 +411,8 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 
 				bcName := "sample-serial-latest-only-build"
 				buildVerified := map[string]bool{}
-				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(metav1.ListOptions{
-					LabelSelector: buildutil.BuildConfigSelector(bcName).String(),
+				buildWatch, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Watch(context.Background(), metav1.ListOptions{
+					LabelSelector: BuildConfigSelector(bcName).String(),
 				})
 				defer buildWatch.Stop()
 				o.Expect(err).NotTo(o.HaveOccurred())
@@ -397,7 +432,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 							expectedRunningBuild = 2
 							break
 						}
-						o.Expect(buildutil.IsBuildComplete(build)).Should(o.BeFalse())
+						o.Expect(IsBuildComplete(build)).Should(o.BeFalse())
 					}
 				}
 
@@ -416,6 +451,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					e2e.Logf("got event for build %s with phase %s", build.Name, build.Status.Phase)
 					// The second build should be cancelled
 					if build.Status.Phase == buildv1.BuildPhaseCancelled {
+						o.Expect(hasConditionState(build, buildv1.BuildPhaseCancelled, true)).Should(o.BeTrue())
 						if build.Name == startedBuilds[1] {
 							buildVerified[build.Name] = true
 							wasCancelled = true
@@ -423,6 +459,12 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 					}
 					// Only first and third build should actually run (serially).
 					if build.Status.Phase == buildv1.BuildPhaseRunning || build.Status.Phase == buildv1.BuildPhasePending {
+						if build.Status.Phase == buildv1.BuildPhaseRunning {
+							o.Expect(hasConditionState(build, buildv1.BuildPhaseRunning, true)).Should(o.BeTrue())
+						}
+						if build.Status.Phase == buildv1.BuildPhasePending {
+							o.Expect(hasConditionState(build, buildv1.BuildPhasePending, true)).Should(o.BeTrue())
+						}
 						// Ignore events from complete builds (if there are any) if we already
 						// verified the build.
 						if _, exists := buildVerified[build.Name]; exists {
@@ -430,8 +472,7 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 						}
 						// Verify there are no other running or pending builds than this
 						// build as serial build always runs alone.
-						c := buildclient.NewClientBuildLister(oc.BuildClient().BuildV1())
-						builds, err := buildutil.BuildConfigBuilds(c, oc.Namespace(), bcName, func(b *buildv1.Build) bool {
+						builds, err := BuildConfigBuilds(oc.BuildClient().BuildV1(), oc.Namespace(), bcName, func(b *buildv1.Build) bool {
 							e2e.Logf("[%s] build %s is %s", build.Name, b.Name, b.Status.Phase)
 							if b.Name == build.Name {
 								return false
@@ -459,3 +500,45 @@ var _ = g.Describe("[Feature:Builds][Slow] using build configuration runPolicy",
 		})
 	})
 })
+
+// IsBuildComplete returns whether the provided build is complete or not
+func IsBuildComplete(build *buildv1.Build) bool {
+	return IsTerminalPhase(build.Status.Phase)
+}
+
+// IsTerminalPhase returns true if the provided phase is terminal
+func IsTerminalPhase(phase buildv1.BuildPhase) bool {
+	switch phase {
+	case buildv1.BuildPhaseNew,
+		buildv1.BuildPhasePending,
+		buildv1.BuildPhaseRunning:
+		return false
+	}
+	return true
+}
+
+// BuildConfigBuilds return a list of builds for the given build config.
+// Optionally you can specify a filter function to select only builds that
+// matches your criteria.
+func BuildConfigBuilds(c buildclientv1.BuildsGetter, namespace, name string, filterFunc buildFilter) ([]*buildv1.Build, error) {
+	result, err := c.Builds(namespace).List(context.Background(), metav1.ListOptions{LabelSelector: BuildConfigSelector(name).String()})
+	if err != nil {
+		return nil, err
+	}
+	builds := make([]*buildv1.Build, len(result.Items))
+	for i := range result.Items {
+		builds[i] = &result.Items[i]
+	}
+	if filterFunc == nil {
+		return builds, nil
+	}
+	var filteredList []*buildv1.Build
+	for _, b := range builds {
+		if filterFunc(b) {
+			filteredList = append(filteredList, b)
+		}
+	}
+	return filteredList, nil
+}
+
+type buildFilter func(*buildv1.Build) bool

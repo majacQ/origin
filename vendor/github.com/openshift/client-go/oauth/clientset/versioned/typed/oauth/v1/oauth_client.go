@@ -5,7 +5,6 @@ package v1
 import (
 	v1 "github.com/openshift/api/oauth/v1"
 	"github.com/openshift/client-go/oauth/clientset/versioned/scheme"
-	serializer "k8s.io/apimachinery/pkg/runtime/serializer"
 	rest "k8s.io/client-go/rest"
 )
 
@@ -15,6 +14,7 @@ type OauthV1Interface interface {
 	OAuthAuthorizeTokensGetter
 	OAuthClientsGetter
 	OAuthClientAuthorizationsGetter
+	UserOAuthAccessTokensGetter
 }
 
 // OauthV1Client is used to interact with features provided by the oauth.openshift.io group.
@@ -36,6 +36,10 @@ func (c *OauthV1Client) OAuthClients() OAuthClientInterface {
 
 func (c *OauthV1Client) OAuthClientAuthorizations() OAuthClientAuthorizationInterface {
 	return newOAuthClientAuthorizations(c)
+}
+
+func (c *OauthV1Client) UserOAuthAccessTokens() UserOAuthAccessTokenInterface {
+	return newUserOAuthAccessTokens(c)
 }
 
 // NewForConfig creates a new OauthV1Client for the given config.
@@ -70,7 +74,7 @@ func setConfigDefaults(config *rest.Config) error {
 	gv := v1.SchemeGroupVersion
 	config.GroupVersion = &gv
 	config.APIPath = "/apis"
-	config.NegotiatedSerializer = serializer.DirectCodecFactory{CodecFactory: scheme.Codecs}
+	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
 
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()
