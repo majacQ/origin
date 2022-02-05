@@ -11,9 +11,7 @@
     "triggers": [],
     "source": {
       "type": "Git",
-      "git": {
-        "uri": "https://github.com/openshift/ruby-hello-world"
-      }
+      "dockerfile": "FROM image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
     },
     "strategy": {
       "type": "Docker",
@@ -26,7 +24,7 @@
         ],
         "from": {
           "kind": "DockerImage",
-          "name": "centos/ruby-22-centos7"
+          "name": "image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
         }
       }
     }

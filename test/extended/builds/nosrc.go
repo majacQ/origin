@@ -1,6 +1,7 @@
 package builds
 
 import (
+	"context"
 	"fmt"
 
 	g "github.com/onsi/ginkgo"
@@ -11,34 +12,28 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds] build with empty source", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds] build with empty source", func() {
 	defer g.GinkgoRecover()
 	var (
 		buildFixture = exutil.FixturePath("testdata", "builds", "test-nosrc-build.json")
-		oc           = exutil.NewCLI("cli-build-nosrc", exutil.KubeConfigPath())
+		oc           = exutil.NewCLI("cli-build-nosrc")
 		exampleBuild = exutil.FixturePath("testdata", "builds", "test-build-app")
 	)
 
 	g.Context("", func() {
 
 		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
+			exutil.PreTestDump()
 		})
 
 		g.JustBeforeEach(func() {
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
-			g.By("waiting for builder service account")
-			err = exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "builder")
-			o.Expect(err).NotTo(o.HaveOccurred())
-
 			oc.Run("create").Args("-f", buildFixture).Execute()
 		})
 
 		g.AfterEach(func() {
 			if g.CurrentGinkgoTestDescription().Failed {
 				exutil.DumpPodStates(oc)
+				exutil.DumpConfigMapStates(oc)
 				exutil.DumpPodLogsStartingWith("", oc)
 			}
 		})
@@ -50,7 +45,7 @@ var _ = g.Describe("[Feature:Builds] build with empty source", func() {
 				br.AssertSuccess()
 
 				g.By(fmt.Sprintf("verifying the status of %q", br.BuildPath))
-				build, err := oc.BuildClient().Build().Builds(oc.Namespace()).Get(br.Build.Name, metav1.GetOptions{})
+				build, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Get(context.Background(), br.Build.Name, metav1.GetOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 				o.Expect(build.Spec.Source.Dockerfile).To(o.BeNil())
 				o.Expect(build.Spec.Source.Git).To(o.BeNil())

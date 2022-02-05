@@ -5,13 +5,14 @@ import (
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
-	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	"k8s.io/apimachinery/pkg/runtime"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 
-	buildutil "github.com/openshift/origin/pkg/build/util"
+	buildv1 "github.com/openshift/api/build/v1"
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds][Conformance] s2i build with a quota", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds] s2i build with a quota", func() {
 	defer g.GinkgoRecover()
 	const (
 		buildTestPod     = "build-test-pod"
@@ -20,33 +21,24 @@ var _ = g.Describe("[Feature:Builds][Conformance] s2i build with a quota", func(
 
 	var (
 		buildFixture = exutil.FixturePath("testdata", "builds", "test-s2i-build-quota.json")
-		oc           = exutil.NewCLI("s2i-build-quota", exutil.KubeConfigPath())
+		oc           = exutil.NewCLI("s2i-build-quota")
 	)
 
 	g.Context("", func() {
 		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
-		})
-
-		g.JustBeforeEach(func() {
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
-			g.By("waiting for builder service account")
-			err = exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "builder")
-			o.Expect(err).NotTo(o.HaveOccurred())
+			exutil.PreTestDump()
 		})
 
 		g.AfterEach(func() {
 			if g.CurrentGinkgoTestDescription().Failed {
 				exutil.DumpPodStates(oc)
+				exutil.DumpConfigMapStates(oc)
 				exutil.DumpPodLogsStartingWith("", oc)
 			}
 		})
 
 		g.Describe("Building from a template", func() {
 			g.It("should create an s2i build with a quota and run it", func() {
-				g.Skip("TODO: renable after https://github.com/containers/buildah/issues/1081 is fixed")
 				g.By(fmt.Sprintf("calling oc create -f %q", buildFixture))
 				err := oc.Run("create").Args("-f", buildFixture).Execute()
 				o.Expect(err).NotTo(o.HaveOccurred())
@@ -61,17 +53,21 @@ var _ = g.Describe("[Feature:Builds][Conformance] s2i build with a quota", func(
 				o.Expect(br.Build.Status.Duration).To(o.Equal(duration), "Build duration should be computed correctly")
 
 				g.By("expecting the build logs to contain the correct cgroups values")
-				buildLog, err := br.Logs()
+				buildLog, err := br.LogsNoTimestamp()
 				o.Expect(err).NotTo(o.HaveOccurred())
-				o.Expect(buildLog).To(o.ContainSubstring("MEMORY=209715200"))
-				o.Expect(buildLog).To(o.ContainSubstring("MEMORYSWAP=209715200"))
+				o.Expect(buildLog).To(o.ContainSubstring("MEMORY=419430400"))
+				// TODO: re-enable this check when https://github.com/containers/buildah/issues/1213 is resolved.
+				//o.Expect(buildLog).To(o.ContainSubstring("MEMORYSWAP=419430400"))
 
-				events, err := oc.KubeClient().Core().Events(oc.Namespace()).Search(legacyscheme.Scheme, br.Build)
+				testScheme := runtime.NewScheme()
+				utilruntime.Must(buildv1.Install(testScheme))
+
+				events, err := oc.KubeClient().CoreV1().Events(oc.Namespace()).Search(testScheme, br.Build)
 				o.Expect(err).NotTo(o.HaveOccurred(), "Should be able to get events from the build")
 				o.Expect(events).NotTo(o.BeNil(), "Build event list should not be nil")
 
-				exutil.CheckForBuildEvent(oc.KubeClient().Core(), br.Build, buildutil.BuildStartedEventReason, buildutil.BuildStartedEventMessage)
-				exutil.CheckForBuildEvent(oc.KubeClient().Core(), br.Build, buildutil.BuildCompletedEventReason, buildutil.BuildCompletedEventMessage)
+				exutil.CheckForBuildEvent(oc.KubeClient().CoreV1(), br.Build, BuildStartedEventReason, BuildStartedEventMessage)
+				exutil.CheckForBuildEvent(oc.KubeClient().CoreV1(), br.Build, BuildCompletedEventReason, BuildCompletedEventMessage)
 
 			})
 		})

@@ -20,6 +20,11 @@ import (
 	"fmt"
 	"time"
 
+	"k8s.io/apiserver/pkg/authentication/user"
+	"k8s.io/kubernetes/openshift-kube-apiserver/authorization/browsersafe"
+	"k8s.io/kubernetes/openshift-kube-apiserver/authorization/scopeauthorizer"
+
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/apiserver/pkg/authorization/authorizer"
 	"k8s.io/apiserver/pkg/authorization/authorizerfactory"
 	"k8s.io/apiserver/pkg/authorization/union"
@@ -27,14 +32,14 @@ import (
 	versionedinformers "k8s.io/client-go/informers"
 	"k8s.io/kubernetes/pkg/auth/authorizer/abac"
 	"k8s.io/kubernetes/pkg/auth/nodeidentifier"
-	informers "k8s.io/kubernetes/pkg/client/informers/informers_generated/internalversion"
 	"k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
 	"k8s.io/kubernetes/plugin/pkg/auth/authorizer/node"
 	"k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac"
 	"k8s.io/kubernetes/plugin/pkg/auth/authorizer/rbac/bootstrappolicy"
 )
 
-type AuthorizationConfig struct {
+// Config contains the data on how to authorize a request to the Kube API Server
+type Config struct {
 	AuthorizationModes []string
 
 	// Options for ModeABAC
@@ -46,18 +51,22 @@ type AuthorizationConfig struct {
 
 	// Kubeconfig file for Webhook authorization plugin.
 	WebhookConfigFile string
+	// API version of subject access reviews to send to the webhook (e.g. "v1", "v1beta1")
+	WebhookVersion string
 	// TTL for caching of authorized responses from the webhook server.
 	WebhookCacheAuthorizedTTL time.Duration
 	// TTL for caching of unauthorized responses from the webhook server.
 	WebhookCacheUnauthorizedTTL time.Duration
 
-	InformerFactory          informers.SharedInformerFactory
 	VersionedInformerFactory versionedinformers.SharedInformerFactory
+
+	// Optional field, custom dial function used to connect to webhook
+	CustomDial utilnet.DialFunc
 }
 
 // New returns the right sort of union of multiple authorizer.Authorizer objects
 // based on the authorizationMode or an error.
-func (config AuthorizationConfig) New() (authorizer.Authorizer, authorizer.RuleResolver, error) {
+func (config Config) New() (authorizer.Authorizer, authorizer.RuleResolver, error) {
 	if len(config.AuthorizationModes) == 0 {
 		return nil, nil, fmt.Errorf("at least one authorization mode must be passed")
 	}
@@ -74,13 +83,14 @@ func (config AuthorizationConfig) New() (authorizer.Authorizer, authorizer.RuleR
 			graph := node.NewGraph()
 			node.AddGraphEventHandlers(
 				graph,
-				config.InformerFactory.Core().InternalVersion().Nodes(),
-				config.InformerFactory.Core().InternalVersion().Pods(),
-				config.InformerFactory.Core().InternalVersion().PersistentVolumes(),
-				config.VersionedInformerFactory.Storage().V1beta1().VolumeAttachments(),
+				config.VersionedInformerFactory.Core().V1().Nodes(),
+				config.VersionedInformerFactory.Core().V1().Pods(),
+				config.VersionedInformerFactory.Core().V1().PersistentVolumes(),
+				config.VersionedInformerFactory.Storage().V1().VolumeAttachments(),
 			)
 			nodeAuthorizer := node.NewAuthorizer(graph, nodeidentifier.NewDefaultNodeIdentifier(), bootstrappolicy.NodeRules())
 			authorizers = append(authorizers, nodeAuthorizer)
+			ruleResolvers = append(ruleResolvers, nodeAuthorizer)
 
 		case modes.ModeAlwaysAllow:
 			alwaysAllowAuthorizer := authorizerfactory.NewAlwaysAllowAuthorizer()
@@ -99,8 +109,10 @@ func (config AuthorizationConfig) New() (authorizer.Authorizer, authorizer.RuleR
 			ruleResolvers = append(ruleResolvers, abacAuthorizer)
 		case modes.ModeWebhook:
 			webhookAuthorizer, err := webhook.New(config.WebhookConfigFile,
+				config.WebhookVersion,
 				config.WebhookCacheAuthorizedTTL,
-				config.WebhookCacheUnauthorizedTTL)
+				config.WebhookCacheUnauthorizedTTL,
+				config.CustomDial)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -113,8 +125,16 @@ func (config AuthorizationConfig) New() (authorizer.Authorizer, authorizer.RuleR
 				&rbac.ClusterRoleGetter{Lister: config.VersionedInformerFactory.Rbac().V1().ClusterRoles().Lister()},
 				&rbac.ClusterRoleBindingLister{Lister: config.VersionedInformerFactory.Rbac().V1().ClusterRoleBindings().Lister()},
 			)
-			authorizers = append(authorizers, rbacAuthorizer)
+			// Wrap with an authorizer that detects unsafe requests and modifies verbs/resources appropriately so policy can address them separately
+			authorizers = append(authorizers, browsersafe.NewBrowserSafeAuthorizer(rbacAuthorizer, user.AllAuthenticated))
 			ruleResolvers = append(ruleResolvers, rbacAuthorizer)
+		case modes.ModeScope:
+			// Wrap with an authorizer that detects unsafe requests and modifies verbs/resources appropriately so policy can address them separately
+			scopeLimitedAuthorizer := scopeauthorizer.NewAuthorizer(config.VersionedInformerFactory.Rbac().V1().ClusterRoles().Lister())
+			authorizers = append(authorizers, browsersafe.NewBrowserSafeAuthorizer(scopeLimitedAuthorizer, user.AllAuthenticated))
+		case modes.ModeSystemMasters:
+			// no browsersafeauthorizer here becase that rewrites the resources.  This authorizer matches no matter which resource matches.
+			authorizers = append(authorizers, authorizerfactory.NewPrivilegedGroups(user.SystemPrivilegedGroup))
 		default:
 			return nil, nil, fmt.Errorf("unknown authorization mode %s specified", authorizationMode)
 		}

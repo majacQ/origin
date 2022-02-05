@@ -1,6 +1,7 @@
 package image_ecosystem
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -10,7 +11,6 @@ import (
 	"github.com/openshift/api/template"
 	exutil "github.com/openshift/origin/test/extended/util"
 	"github.com/openshift/origin/test/extended/util/db"
-	testutil "github.com/openshift/origin/test/util"
 
 	//	kapiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,10 +72,10 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase, cleanup func()) func() 
 		// up prior to the AfterEach processing, to guaranteed deletion order
 		defer cleanup()
 
-		err := testutil.WaitForPolicyUpdate(oc.InternalKubeClient().Authorization(), oc.Namespace(), "create", template.Resource("templates"), true)
+		err := WaitForPolicyUpdate(oc.KubeClient().AuthorizationV1(), oc.Namespace(), "create", template.Resource("templates"), true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
-		exutil.CheckOpenShiftNamespaceImageStreams(oc)
+		exutil.WaitForOpenShiftNamespaceImageStreams(oc)
 		err = oc.Run("create").Args("-f", tc.TemplatePath).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 
@@ -92,7 +92,7 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase, cleanup func()) func() 
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("waiting for an endpoint")
-		err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), helperName)
+		err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), helperName)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		tableCounter := 0
@@ -107,7 +107,7 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase, cleanup func()) func() 
 
 			// Test if we can query as root
 			g.By("wait for mysql-master endpoint")
-			err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mysql-master")
+			err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mysql-master")
 			o.Expect(err).NotTo(o.HaveOccurred())
 			err := helper.TestRemoteLogin(oc, "mysql-master")
 			o.Expect(err).NotTo(o.HaveOccurred())
@@ -175,7 +175,7 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase, cleanup func()) func() 
 		o.Expect(err).NotTo(o.HaveOccurred())
 		assertReplicationIsWorking("mysql-master-2", "mysql-slave-1", 1)
 
-		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(metav1.ListOptions{LabelSelector: exutil.ParseLabelsOrDie("deployment=mysql-slave-1").String()})
+		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(context.Background(), metav1.ListOptions{LabelSelector: exutil.ParseLabelsOrDie("deployment=mysql-slave-1").String()})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		o.Expect(len(pods.Items)).To(o.Equal(1))
 
@@ -194,11 +194,11 @@ func replicationTestFactory(oc *exutil.CLI, tc testCase, cleanup func()) func() 
 }
 
 /*
-var _ = g.Describe("[image_ecosystem][mysql][Slow] openshift mysql replication", func() {
+var _ = g.Describe("[sig-devex][Feature:ImageEcosystem][mysql][Slow] openshift mysql replication", func() {
 	defer g.GinkgoRecover()
 	g.Skip("db replica tests are currently flaky and disabled")
 
-	var oc = exutil.NewCLI("mysql-replication", exutil.KubeConfigPath())
+	var oc = exutil.NewCLI("mysql-replication")
 	var pvs = []*kapiv1.PersistentVolume{}
 	var nfspod = &kapiv1.Pod{}
 	var cleanup = func() {
@@ -227,7 +227,7 @@ var _ = g.Describe("[image_ecosystem][mysql][Slow] openshift mysql replication",
 
 	g.Context("", func() {
 		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
+			exutil.PreTestDump()
 
 			g.By("waiting for default service account")
 			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")

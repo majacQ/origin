@@ -1,12 +1,26 @@
 package configdefaults
 
 import (
+	"time"
+
 	configv1 "github.com/openshift/api/config/v1"
 	"github.com/openshift/library-go/pkg/crypto"
 )
 
 func DefaultString(target *string, defaultVal string) {
 	if len(*target) == 0 {
+		*target = defaultVal
+	}
+}
+
+func DefaultInt(target *int, defaultVal int) {
+	if *target == 0 {
+		*target = defaultVal
+	}
+}
+
+func DefaultMetaDuration(target *time.Duration, defaultVal time.Duration) {
+	if *target == 0 {
 		*target = defaultVal
 	}
 }
@@ -30,7 +44,7 @@ func SetRecommendedHTTPServingInfoDefaults(config *configv1.HTTPServingInfo) {
 
 func SetRecommendedServingInfoDefaults(config *configv1.ServingInfo) {
 	DefaultString(&config.BindAddress, "0.0.0.0:8443")
-	DefaultString(&config.BindNetwork, "tcp4")
+	DefaultString(&config.BindNetwork, "tcp")
 	DefaultString(&config.CertInfo.KeyFile, "/var/run/secrets/serving-cert/tls.key")
 	DefaultString(&config.CertInfo.CertFile, "/var/run/secrets/serving-cert/tls.crt")
 	DefaultString(&config.ClientCA, "/var/run/configmaps/client-ca/ca-bundle.crt")

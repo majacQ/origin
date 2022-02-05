@@ -1,8 +1,8 @@
 package builds
 
 import (
+	"context"
 	"fmt"
-	"strings"
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
@@ -12,42 +12,40 @@ import (
 	e2e "k8s.io/kubernetes/test/e2e/framework"
 
 	buildv1 "github.com/openshift/api/build/v1"
+	eximages "github.com/openshift/origin/test/extended/images"
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds] Multi-stage image builds", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds] Multi-stage image builds", func() {
 	defer g.GinkgoRecover()
 	var (
-		oc             = exutil.NewCLI("build-multistage", exutil.KubeConfigPath())
+		oc             = exutil.NewCLI("build-multistage")
 		testDockerfile = `
 FROM scratch as test
 USER 1001
-FROM centos:7
+FROM image-registry.openshift-image-registry.svc:5000/openshift/cli:latest as other
 COPY --from=test /usr/bin/curl /test/
+COPY --from=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest /bin/echo /test/
+COPY --from=image-registry.openshift-image-registry.svc:5000/openshift/tools:latest /bin/ping /test/
 `
 	)
 
 	g.Context("", func() {
 
-		g.JustBeforeEach(func() {
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
-			g.By("waiting for builder service account")
-			err = exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "builder")
-			o.Expect(err).NotTo(o.HaveOccurred())
-		})
-
 		g.AfterEach(func() {
 			if g.CurrentGinkgoTestDescription().Failed {
 				exutil.DumpPodStates(oc)
+				exutil.DumpConfigMapStates(oc)
 				exutil.DumpPodLogsStartingWith("", oc)
 			}
 		})
 
-		g.It("should succeed [Conformance]", func() {
+		g.It("should succeed", func() {
 			g.By("creating a build directly")
-			build, err := oc.BuildClient().Build().Builds(oc.Namespace()).Create(&buildv1.Build{
+			registryURL, err := eximages.GetDockerRegistryURL(oc)
+			o.Expect(err).NotTo(o.HaveOccurred())
+
+			build, err := oc.BuildClient().BuildV1().Builds(oc.Namespace()).Create(context.Background(), &buildv1.Build{
 				ObjectMeta: metav1.ObjectMeta{
 					Name: "multi-stage",
 				},
@@ -56,7 +54,7 @@ COPY --from=test /usr/bin/curl /test/
 						Source: buildv1.BuildSource{
 							Dockerfile: &testDockerfile,
 							Images: []buildv1.ImageSource{
-								{From: corev1.ObjectReference{Kind: "DockerImage", Name: "centos:7"}, As: []string{"scratch"}},
+								{From: corev1.ObjectReference{Kind: "DockerImage", Name: "image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"}, As: []string{"scratch"}},
 							},
 						},
 						Strategy: buildv1.BuildStrategy{
@@ -65,28 +63,26 @@ COPY --from=test /usr/bin/curl /test/
 						Output: buildv1.BuildOutput{
 							To: &corev1.ObjectReference{
 								Kind: "DockerImage",
-								Name: fmt.Sprintf("docker-registry.default.svc:5000/%s/multi-stage:v1", oc.Namespace()),
+								Name: fmt.Sprintf("%s/%s/multi-stage:v1", registryURL, oc.Namespace()),
 							},
 						},
 					},
 				},
-			})
+			}, metav1.CreateOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
 			result := exutil.NewBuildResult(oc, build)
-			err = exutil.WaitForBuildResult(oc.AdminBuildClient().Build().Builds(oc.Namespace()), result)
+			err = exutil.WaitForBuildResult(oc.AdminBuildClient().BuildV1().Builds(oc.Namespace()), result)
 			o.Expect(err).NotTo(o.HaveOccurred())
 
-			pod, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).Get(build.Name+"-build", metav1.GetOptions{})
+			pod, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).Get(context.Background(), build.Name+"-build", metav1.GetOptions{})
 			o.Expect(err).NotTo(o.HaveOccurred())
-			if !result.BuildSuccess && strings.HasSuffix(pod.Spec.Containers[0].Image, ":v3.10.0-alpha.0") {
-				g.Skip(fmt.Sprintf("The currently selected builder image does not yet support optimized image builds: %s", pod.Spec.Containers[0].Image))
-			}
-
 			o.Expect(result.BuildSuccess).To(o.BeTrue(), "Build did not succeed: %#v", result)
 
 			s, err := result.Logs()
 			o.Expect(err).NotTo(o.HaveOccurred())
 			o.Expect(s).ToNot(o.ContainSubstring("--> FROM scratch"))
+			o.Expect(s).To(o.ContainSubstring("FROM image-registry.openshift-image-registry.svc:5000/openshift/cli:latest AS other"))
+			o.Expect(s).To(o.ContainSubstring("STEP 1: FROM image-registry.openshift-image-registry.svc:5000/openshift/tools:latest AS test"))
 			o.Expect(s).To(o.ContainSubstring("COPY --from"))
 			o.Expect(s).To(o.ContainSubstring(fmt.Sprintf("\"OPENSHIFT_BUILD_NAMESPACE\"=\"%s\"", oc.Namespace())))
 			e2e.Logf("Build logs:\n%s", result)
@@ -101,16 +97,25 @@ COPY --from=test /usr/bin/curl /test/
 					Containers: []corev1.Container{
 						{
 							Name:    "run",
-							Image:   fmt.Sprintf("docker-registry.default.svc:5000/%s/multi-stage:v1", oc.Namespace()),
+							Image:   fmt.Sprintf("%s/%s/multi-stage:v1", registryURL, oc.Namespace()),
 							Command: []string{"/test/curl", "-k", "https://kubernetes.default.svc"},
+						},
+						{
+							Name:    "check",
+							Image:   fmt.Sprintf("%s/%s/multi-stage:v1", registryURL, oc.Namespace()),
+							Command: []string{"ls", "/test/"},
 						},
 					},
 				},
 			})
 			c.WaitForSuccess(pod.Name, e2e.PodStartTimeout)
-			data, err := c.GetLogs(pod.Name, &corev1.PodLogOptions{}).DoRaw()
+			data, err := oc.Run("logs").Args("-f", "test", "-c", "run").Output()
 			o.Expect(err).NotTo(o.HaveOccurred())
-			e2e.Logf("Pod logs:\n%s", string(data))
+			m, err := oc.Run("logs").Args("-f", "test", "-c", "check").Output()
+			o.Expect(err).NotTo(o.HaveOccurred())
+			o.Expect(m).To(o.ContainSubstring("echo"))
+			o.Expect(m).To(o.ContainSubstring("ping"))
+			e2e.Logf("Pod logs:\n%s\n%s", string(data), string(m))
 		})
 	})
 })

@@ -6,7 +6,7 @@ items:
   apiVersion: v1
   metadata:
     name: origin-ruby-sample
-    creationTimestamp: 
+    creationTimestamp:
   spec: {}
   status:
     dockerImageRepository: ''
@@ -14,7 +14,7 @@ items:
   apiVersion: v1
   metadata:
     name: sample-build
-    creationTimestamp: 
+    creationTimestamp:
   spec:
     triggers:
     - type: imageChange
@@ -35,12 +35,12 @@ items:
           value: 127.0.0.1:3128
         from:
           kind: DockerImage
-          name: centos/ruby-22-centos7
+          name: quay.io/redhat-developer/test-build-simples2i:latest
 - kind: BuildConfig
   apiVersion: v1
   metadata:
     name: sample-s2i-build-noproxy
-    creationTimestamp: 
+    creationTimestamp:
   spec:
     triggers:
     - type: imageChange
@@ -57,7 +57,7 @@ items:
       sourceStrategy:
         from:
           kind: DockerImage
-          name: centos/ruby-22-centos7
+          name: quay.io/redhat-developer/test-build-simples2i:latest
         env:
         - name: SOME_HTTP_PROXY
           value: https://envuser:password@proxy3.com
@@ -67,7 +67,7 @@ items:
   apiVersion: v1
   metadata:
     name: sample-docker-build-noproxy
-    creationTimestamp: 
+    creationTimestamp:
   spec:
     triggers:
     - type: imageChange
@@ -84,7 +84,7 @@ items:
       dockerStrategy:
         from:
           kind: DockerImage
-          name: centos/ruby-22-centos7
+          name: image-registry.openshift-image-registry.svc:5000/openshift/ruby:2.7
         env:
         - name: SOME_HTTP_PROXY
           value: https://envuser:password@proxy3.com

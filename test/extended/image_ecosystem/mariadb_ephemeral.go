@@ -5,24 +5,20 @@ import (
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
-	e2e "k8s.io/kubernetes/test/e2e/framework"
 
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[image_ecosystem][mariadb][Slow] openshift mariadb image", func() {
+var _ = g.Describe("[sig-devex][Feature:ImageEcosystem][mariadb][Slow] openshift mariadb image", func() {
 	defer g.GinkgoRecover()
 	var (
-		templatePath = exutil.FixturePath("..", "..", "examples", "db-templates", "mariadb-ephemeral-template.json")
-		oc           = exutil.NewCLI("mariadb-create", exutil.KubeConfigPath())
+		templatePath = "mariadb-ephemeral"
+		oc           = exutil.NewCLI("mariadb-create")
 	)
 
 	g.Context("", func() {
 		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
+			exutil.PreTestDump()
 		})
 
 		g.AfterEach(func() {
@@ -35,10 +31,10 @@ var _ = g.Describe("[image_ecosystem][mariadb][Slow] openshift mariadb image", f
 
 		g.Describe("Creating from a template", func() {
 			g.It(fmt.Sprintf("should instantiate the template"), func() {
-				exutil.CheckOpenShiftNamespaceImageStreams(oc)
+				exutil.WaitForOpenShiftNamespaceImageStreams(oc)
 
-				g.By(fmt.Sprintf("calling oc process -f %q", templatePath))
-				configFile, err := oc.Run("process").Args("-f", templatePath).OutputToFile("config.json")
+				g.By(fmt.Sprintf("calling oc process %q", templatePath))
+				configFile, err := oc.Run("process").Args("openshift//" + templatePath).OutputToFile("config.json")
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By(fmt.Sprintf("calling oc create -f %q", configFile))
@@ -51,7 +47,7 @@ var _ = g.Describe("[image_ecosystem][mariadb][Slow] openshift mariadb image", f
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("expecting the mariadb service get endpoints")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mariadb")
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mariadb")
 				o.Expect(err).NotTo(o.HaveOccurred())
 			})
 		})

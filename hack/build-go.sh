@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # This script sets up a go workspace locally and builds all go components.
 source "$(dirname "${BASH_SOURCE}")/lib/init.sh"
@@ -14,11 +14,7 @@ platform="$(os::build::host_platform)"
 
 build_targets=("$@")
 if [[ -z "$@" ]]; then
-  if [[ "${platform}" == linux/* ]]; then
-    build_targets=("${OS_CROSS_COMPILE_TARGETS[@]}" "${OS_IMAGE_COMPILE_TARGETS_LINUX[@]}")
-  else
-    build_targets=("${OS_CROSS_COMPILE_TARGETS[@]}" cmd/hypershift vendor/k8s.io/kubernetes/cmd/hyperkube)
-  fi
+    build_targets=(cmd/openshift-tests)
 fi
 
 OS_BUILD_PLATFORMS=("${OS_BUILD_PLATFORMS[@]:-${platform}}")

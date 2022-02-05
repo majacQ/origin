@@ -18,6 +18,7 @@ package storage
 
 import (
 	"context"
+	"net"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,6 +30,7 @@ import (
 	printersinternal "k8s.io/kubernetes/pkg/printers/internalversion"
 	printerstorage "k8s.io/kubernetes/pkg/printers/storage"
 	"k8s.io/kubernetes/pkg/registry/core/service"
+	registry "k8s.io/kubernetes/pkg/registry/core/service"
 )
 
 type GenericREST struct {
@@ -36,28 +38,30 @@ type GenericREST struct {
 }
 
 // NewREST returns a RESTStorage object that will work against services.
-func NewGenericREST(optsGetter generic.RESTOptionsGetter) (*GenericREST, *StatusREST) {
+func NewGenericREST(optsGetter generic.RESTOptionsGetter, serviceCIDR net.IPNet, hasSecondary bool) (*GenericREST, *StatusREST, error) {
+	strategy, _ := registry.StrategyForServiceCIDRs(serviceCIDR, hasSecondary)
+
 	store := &genericregistry.Store{
 		NewFunc:                  func() runtime.Object { return &api.Service{} },
 		NewListFunc:              func() runtime.Object { return &api.ServiceList{} },
 		DefaultQualifiedResource: api.Resource("services"),
 		ReturnDeletedObject:      true,
 
-		CreateStrategy: service.Strategy,
-		UpdateStrategy: service.Strategy,
-		DeleteStrategy: service.Strategy,
-		ExportStrategy: service.Strategy,
+		CreateStrategy: strategy,
+		UpdateStrategy: strategy,
+		DeleteStrategy: strategy,
+		ExportStrategy: strategy,
 
-		TableConvertor: printerstorage.TableConvertor{TablePrinter: printers.NewTablePrinter().With(printersinternal.AddHandlers)},
+		TableConvertor: printerstorage.TableConvertor{TableGenerator: printers.NewTableGenerator().With(printersinternal.AddHandlers)},
 	}
 	options := &generic.StoreOptions{RESTOptions: optsGetter}
 	if err := store.CompleteWithOptions(options); err != nil {
-		panic(err) // TODO: Propagate error up
+		return nil, nil, err
 	}
 
 	statusStore := *store
-	statusStore.UpdateStrategy = service.StatusStrategy
-	return &GenericREST{store}, &StatusREST{store: &statusStore}
+	statusStore.UpdateStrategy = service.NewServiceStatusStrategy(strategy)
+	return &GenericREST{store}, &StatusREST{store: &statusStore}, nil
 }
 
 var (
@@ -90,6 +94,8 @@ func (r *StatusREST) Get(ctx context.Context, name string, options *metav1.GetOp
 }
 
 // Update alters the status subset of an object.
-func (r *StatusREST) Update(ctx context.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc) (runtime.Object, bool, error) {
-	return r.store.Update(ctx, name, objInfo, createValidation, updateValidation)
+func (r *StatusREST) Update(ctx context.Context, name string, objInfo rest.UpdatedObjectInfo, createValidation rest.ValidateObjectFunc, updateValidation rest.ValidateObjectUpdateFunc, forceAllowCreate bool, options *metav1.UpdateOptions) (runtime.Object, bool, error) {
+	// We are explicitly setting forceAllowCreate to false in the call to the underlying storage because
+	// subresources should never allow create on update.
+	return r.store.Update(ctx, name, objInfo, createValidation, updateValidation, false, options)
 }

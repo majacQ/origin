@@ -3,6 +3,7 @@ package url
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +16,7 @@ import (
 	o "github.com/onsi/gomega"
 
 	exutil "github.com/openshift/origin/test/extended/util"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -35,7 +36,7 @@ func NewTester(client kclientset.Interface, ns string) *Tester {
 }
 
 func (ut *Tester) Close() {
-	if err := ut.client.Core().Pods(ut.namespace).Delete(ut.podName, metav1.NewDeleteOptions(1)); err != nil {
+	if err := ut.client.CoreV1().Pods(ut.namespace).Delete(context.Background(), ut.podName, *metav1.NewDeleteOptions(1)); err != nil {
 		e2e.Logf("Failed to delete exec pod %s: %v", ut.podName, err)
 	}
 	ut.podName = ""
@@ -134,7 +135,7 @@ func (ut *Tester) Within(t time.Duration, tests ...*Test) {
 	o.Expect(err).ToNot(o.HaveOccurred())
 }
 
-// createExecPod creates a simple centos:7 pod in a sleep loop used as a
+// createExecPod creates a simple pod in a sleep loop used as a
 // vessel for kubectl exec commands.
 // Returns the name of the created pod.
 func createExecPod(clientset kclientset.Interface, ns, name string) (string, error) {
@@ -150,21 +151,21 @@ func createExecPod(clientset kclientset.Interface, ns, name string) (string, err
 				{
 					Command:         []string{"/bin/bash", "-c", "exec sleep 10000"},
 					Name:            "hostexec",
-					Image:           "centos:7",
+					Image:           "registry.redhat.io/rhel7:latest",
 					ImagePullPolicy: v1.PullIfNotPresent,
 				},
 			},
-			HostNetwork:                   true,
+			HostNetwork:                   false,
 			TerminationGracePeriodSeconds: &immediate,
 		},
 	}
 	client := clientset.CoreV1()
-	created, err := client.Pods(ns).Create(execPod)
+	created, err := client.Pods(ns).Create(context.Background(), execPod, metav1.CreateOptions{})
 	if err != nil {
 		return "", err
 	}
 	err = wait.PollImmediate(e2e.Poll, 5*time.Minute, func() (bool, error) {
-		retrievedPod, err := client.Pods(execPod.Namespace).Get(created.Name, metav1.GetOptions{})
+		retrievedPod, err := client.Pods(execPod.Namespace).Get(context.Background(), created.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
 		}
@@ -365,6 +366,7 @@ func (ut *Test) ToShell(i int) string {
 		cmd += ` -k`
 	}
 	cmd += " 2>/tmp/error 1>/tmp/output || rc=$?"
+	lines = append(lines, `: > /tmp/body /tmp/headers`)
 	lines = append(lines, cmd)
 	lines = append(lines, fmt.Sprintf(`echo "{\"test\":%d,\"rc\":$(echo $rc),\"curl\":$(cat /tmp/output),\"error\":$(cat /tmp/error | json_escape),\"body\":\"$(cat /tmp/body | base64 -w 0 -)\",\"headers\":$(cat /tmp/headers | json_escape)}"`, i))
 	return strings.Join(lines, "\n")

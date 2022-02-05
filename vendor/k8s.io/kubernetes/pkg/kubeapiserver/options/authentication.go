@@ -17,28 +17,39 @@ limitations under the License.
 package options
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/golang/glog"
 	"github.com/spf13/pflag"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apiserver/pkg/authentication/authenticator"
 	genericapiserver "k8s.io/apiserver/pkg/server"
+	"k8s.io/apiserver/pkg/server/egressselector"
 	genericoptions "k8s.io/apiserver/pkg/server/options"
-	"k8s.io/apiserver/pkg/util/flag"
-	"k8s.io/kubernetes/pkg/kubeapiserver/authenticator"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
+	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/klog/v2"
+	openapicommon "k8s.io/kube-openapi/pkg/common"
+	serviceaccountcontroller "k8s.io/kubernetes/pkg/controller/serviceaccount"
+	"k8s.io/kubernetes/pkg/features"
+	kubeauthenticator "k8s.io/kubernetes/pkg/kubeapiserver/authenticator"
 	authzmodes "k8s.io/kubernetes/pkg/kubeapiserver/authorizer/modes"
+	"k8s.io/kubernetes/plugin/pkg/auth/authenticator/token/bootstrap"
 )
 
 type BuiltInAuthenticationOptions struct {
+	APIAudiences    []string
 	Anonymous       *AnonymousAuthenticationOptions
 	BootstrapToken  *BootstrapTokenAuthenticationOptions
 	ClientCert      *genericoptions.ClientCertAuthenticationOptions
 	OIDC            *OIDCAuthenticationOptions
-	PasswordFile    *PasswordFileAuthenticationOptions
 	RequestHeader   *genericoptions.RequestHeaderAuthenticationOptions
 	ServiceAccounts *ServiceAccountAuthenticationOptions
 	TokenFile       *TokenFileAuthenticationOptions
@@ -68,15 +79,13 @@ type OIDCAuthenticationOptions struct {
 	RequiredClaims map[string]string
 }
 
-type PasswordFileAuthenticationOptions struct {
-	BasicAuthFile string
-}
-
 type ServiceAccountAuthenticationOptions struct {
-	KeyFiles     []string
-	Lookup       bool
-	Issuer       string
-	APIAudiences []string
+	KeyFiles         []string
+	Lookup           bool
+	Issuer           string
+	JWKSURI          string
+	MaxExpiration    time.Duration
+	ExtendExpiration bool
 }
 
 type TokenFileAuthenticationOptions struct {
@@ -85,6 +94,7 @@ type TokenFileAuthenticationOptions struct {
 
 type WebHookAuthenticationOptions struct {
 	ConfigFile string
+	Version    string
 	CacheTTL   time.Duration
 }
 
@@ -101,7 +111,6 @@ func (s *BuiltInAuthenticationOptions) WithAll() *BuiltInAuthenticationOptions {
 		WithBootstrapToken().
 		WithClientCert().
 		WithOIDC().
-		WithPasswordFile().
 		WithRequestHeader().
 		WithServiceAccounts().
 		WithTokenFile().
@@ -128,11 +137,6 @@ func (s *BuiltInAuthenticationOptions) WithOIDC() *BuiltInAuthenticationOptions 
 	return s
 }
 
-func (s *BuiltInAuthenticationOptions) WithPasswordFile() *BuiltInAuthenticationOptions {
-	s.PasswordFile = &PasswordFileAuthenticationOptions{}
-	return s
-}
-
 func (s *BuiltInAuthenticationOptions) WithRequestHeader() *BuiltInAuthenticationOptions {
 	s.RequestHeader = &genericoptions.RequestHeaderAuthenticationOptions{}
 	return s
@@ -150,6 +154,7 @@ func (s *BuiltInAuthenticationOptions) WithTokenFile() *BuiltInAuthenticationOpt
 
 func (s *BuiltInAuthenticationOptions) WithWebHook() *BuiltInAuthenticationOptions {
 	s.WebHook = &WebHookAuthenticationOptions{
+		Version:  "v1beta1",
 		CacheTTL: 2 * time.Minute,
 	}
 	return s
@@ -168,11 +173,45 @@ func (s *BuiltInAuthenticationOptions) Validate() []error {
 			allErrors = append(allErrors, fmt.Errorf("service-account-issuer contained a ':' but was not a valid URL: %v", err))
 		}
 	}
+	if s.ServiceAccounts != nil && utilfeature.DefaultFeatureGate.Enabled(features.BoundServiceAccountTokenVolume) {
+		if !utilfeature.DefaultFeatureGate.Enabled(features.TokenRequest) || !utilfeature.DefaultFeatureGate.Enabled(features.TokenRequestProjection) {
+			allErrors = append(allErrors, errors.New("if the BoundServiceAccountTokenVolume feature is enabled,"+
+				" the TokenRequest and TokenRequestProjection features must also be enabled"))
+		}
+		if len(s.ServiceAccounts.Issuer) == 0 {
+			allErrors = append(allErrors, errors.New("service-account-issuer is a required flag when BoundServiceAccountTokenVolume is enabled"))
+		}
+		if len(s.ServiceAccounts.KeyFiles) == 0 {
+			allErrors = append(allErrors, errors.New("service-account-key-file is a required flag when BoundServiceAccountTokenVolume is enabled"))
+		}
+	}
+
+	if s.ServiceAccounts != nil {
+		if utilfeature.DefaultFeatureGate.Enabled(features.ServiceAccountIssuerDiscovery) {
+			// Validate the JWKS URI when it is explicitly set.
+			// When unset, it is later derived from ExternalHost.
+			if s.ServiceAccounts.JWKSURI != "" {
+				if u, err := url.Parse(s.ServiceAccounts.JWKSURI); err != nil {
+					allErrors = append(allErrors, fmt.Errorf("service-account-jwks-uri must be a valid URL: %v", err))
+				} else if u.Scheme != "https" {
+					allErrors = append(allErrors, fmt.Errorf("service-account-jwks-uri requires https scheme, parsed as: %v", u.String()))
+				}
+			}
+		} else if len(s.ServiceAccounts.JWKSURI) > 0 {
+			allErrors = append(allErrors, fmt.Errorf("service-account-jwks-uri may only be set when the ServiceAccountIssuerDiscovery feature gate is enabled"))
+		}
+	}
 
 	return allErrors
 }
 
 func (s *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
+	fs.StringSliceVar(&s.APIAudiences, "api-audiences", s.APIAudiences, ""+
+		"Identifiers of the API. The service account token authenticator will validate that "+
+		"tokens used against the API are bound to at least one of these audiences. If the "+
+		"--service-account-issuer flag is configured and this flag is not, this field "+
+		"defaults to a single element list containing the issuer URL.")
+
 	if s.Anonymous != nil {
 		fs.BoolVar(&s.Anonymous.Allow, "anonymous-auth", s.Anonymous.Allow, ""+
 			"Enables anonymous requests to the secure port of the API server. "+
@@ -226,16 +265,10 @@ func (s *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 			"'alg' header value not in this list will be rejected. "+
 			"Values are defined by RFC 7518 https://tools.ietf.org/html/rfc7518#section-3.1.")
 
-		fs.Var(flag.NewMapStringStringNoSplit(&s.OIDC.RequiredClaims), "oidc-required-claim", ""+
+		fs.Var(cliflag.NewMapStringStringNoSplit(&s.OIDC.RequiredClaims), "oidc-required-claim", ""+
 			"A key=value pair that describes a required claim in the ID Token. "+
 			"If set, the claim is verified to be present in the ID Token with a matching value. "+
 			"Repeat this flag to specify multiple claims.")
-	}
-
-	if s.PasswordFile != nil {
-		fs.StringVar(&s.PasswordFile.BasicAuthFile, "basic-auth-file", s.PasswordFile.BasicAuthFile, ""+
-			"If set, the file that will be used to admit requests to the secure port of the API server "+
-			"via http basic authentication.")
 	}
 
 	if s.RequestHeader != nil {
@@ -255,11 +288,36 @@ func (s *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 
 		fs.StringVar(&s.ServiceAccounts.Issuer, "service-account-issuer", s.ServiceAccounts.Issuer, ""+
 			"Identifier of the service account token issuer. The issuer will assert this identifier "+
-			"in \"iss\" claim of issued tokens. This value is a string or URI.")
+			"in \"iss\" claim of issued tokens. This value is a string or URI. If this option is not "+
+			"a valid URI per the OpenID Discovery 1.0 spec, the ServiceAccountIssuerDiscovery feature "+
+			"will remain disabled, even if the feature gate is set to true. It is highly recommended "+
+			"that this value comply with the OpenID spec: https://openid.net/specs/openid-connect-discovery-1_0.html. "+
+			"In practice, this means that service-account-issuer must be an https URL. It is also highly "+
+			"recommended that this URL be capable of serving OpenID discovery documents at "+
+			"`{service-account-issuer}/.well-known/openid-configuration`.")
 
-		fs.StringSliceVar(&s.ServiceAccounts.APIAudiences, "service-account-api-audiences", s.ServiceAccounts.APIAudiences, ""+
+		fs.StringVar(&s.ServiceAccounts.JWKSURI, "service-account-jwks-uri", s.ServiceAccounts.JWKSURI, ""+
+			"Overrides the URI for the JSON Web Key Set in the discovery doc served at "+
+			"/.well-known/openid-configuration. This flag is useful if the discovery doc"+
+			"and key set are served to relying parties from a URL other than the "+
+			"API server's external (as auto-detected or overridden with external-hostname). "+
+			"Only valid if the ServiceAccountIssuerDiscovery feature gate is enabled.")
+
+		// Deprecated in 1.13
+		fs.StringSliceVar(&s.APIAudiences, "service-account-api-audiences", s.APIAudiences, ""+
 			"Identifiers of the API. The service account token authenticator will validate that "+
 			"tokens used against the API are bound to at least one of these audiences.")
+		fs.MarkDeprecated("service-account-api-audiences", "Use --api-audiences")
+
+		fs.DurationVar(&s.ServiceAccounts.MaxExpiration, "service-account-max-token-expiration", s.ServiceAccounts.MaxExpiration, ""+
+			"The maximum validity duration of a token created by the service account token issuer. If an otherwise valid "+
+			"TokenRequest with a validity duration larger than this value is requested, a token will be issued with a validity duration of this value.")
+
+		fs.BoolVar(&s.ServiceAccounts.ExtendExpiration, "service-account-extend-token-expiration", s.ServiceAccounts.ExtendExpiration, ""+
+			"Turns on projected service account expiration extension during token generation, "+
+			"which helps safe transition from legacy token to bound service account token feature. "+
+			"If this flag is enabled, admission injected tokens would be extended up to 1 year to "+
+			"prevent unexpected failure during transition, ignoring value of service-account-max-token-expiration.")
 	}
 
 	if s.TokenFile != nil {
@@ -273,13 +331,16 @@ func (s *BuiltInAuthenticationOptions) AddFlags(fs *pflag.FlagSet) {
 			"File with webhook configuration for token authentication in kubeconfig format. "+
 			"The API server will query the remote service to determine authentication for bearer tokens.")
 
+		fs.StringVar(&s.WebHook.Version, "authentication-token-webhook-version", s.WebHook.Version, ""+
+			"The API version of the authentication.k8s.io TokenReview to send to and expect from the webhook.")
+
 		fs.DurationVar(&s.WebHook.CacheTTL, "authentication-token-webhook-cache-ttl", s.WebHook.CacheTTL,
 			"The duration to cache responses from the webhook token authenticator.")
 	}
 }
 
-func (s *BuiltInAuthenticationOptions) ToAuthenticationConfig() authenticator.AuthenticatorConfig {
-	ret := authenticator.AuthenticatorConfig{
+func (s *BuiltInAuthenticationOptions) ToAuthenticationConfig() (kubeauthenticator.Config, error) {
+	ret := kubeauthenticator.Config{
 		TokenSuccessCacheTTL: s.TokenSuccessCacheTTL,
 		TokenFailureCacheTTL: s.TokenFailureCacheTTL,
 	}
@@ -293,7 +354,11 @@ func (s *BuiltInAuthenticationOptions) ToAuthenticationConfig() authenticator.Au
 	}
 
 	if s.ClientCert != nil {
-		ret.ClientCAFile = s.ClientCert.ClientCA
+		var err error
+		ret.ClientCAContentProvider, err = s.ClientCert.GetClientCAContentProvider()
+		if err != nil {
+			return kubeauthenticator.Config{}, err
+		}
 	}
 
 	if s.OIDC != nil {
@@ -308,19 +373,22 @@ func (s *BuiltInAuthenticationOptions) ToAuthenticationConfig() authenticator.Au
 		ret.OIDCRequiredClaims = s.OIDC.RequiredClaims
 	}
 
-	if s.PasswordFile != nil {
-		ret.BasicAuthFile = s.PasswordFile.BasicAuthFile
-	}
-
 	if s.RequestHeader != nil {
-		ret.RequestHeaderConfig = s.RequestHeader.ToAuthenticationRequestHeaderConfig()
+		var err error
+		ret.RequestHeaderConfig, err = s.RequestHeader.ToAuthenticationRequestHeaderConfig()
+		if err != nil {
+			return kubeauthenticator.Config{}, err
+		}
 	}
 
+	ret.APIAudiences = s.APIAudiences
 	if s.ServiceAccounts != nil {
+		if s.ServiceAccounts.Issuer != "" && len(s.APIAudiences) == 0 {
+			ret.APIAudiences = authenticator.Audiences{s.ServiceAccounts.Issuer}
+		}
 		ret.ServiceAccountKeyFiles = s.ServiceAccounts.KeyFiles
-		ret.ServiceAccountLookup = s.ServiceAccounts.Lookup
 		ret.ServiceAccountIssuer = s.ServiceAccounts.Issuer
-		ret.ServiceAccountAPIAudiences = s.ServiceAccounts.APIAudiences
+		ret.ServiceAccountLookup = s.ServiceAccounts.Lookup
 	}
 
 	if s.TokenFile != nil {
@@ -329,39 +397,77 @@ func (s *BuiltInAuthenticationOptions) ToAuthenticationConfig() authenticator.Au
 
 	if s.WebHook != nil {
 		ret.WebhookTokenAuthnConfigFile = s.WebHook.ConfigFile
+		ret.WebhookTokenAuthnVersion = s.WebHook.Version
 		ret.WebhookTokenAuthnCacheTTL = s.WebHook.CacheTTL
 
 		if len(s.WebHook.ConfigFile) > 0 && s.WebHook.CacheTTL > 0 {
 			if s.TokenSuccessCacheTTL > 0 && s.WebHook.CacheTTL < s.TokenSuccessCacheTTL {
-				glog.Warningf("the webhook cache ttl of %s is shorter than the overall cache ttl of %s for successful token authentication attempts.", s.WebHook.CacheTTL, s.TokenSuccessCacheTTL)
+				klog.Warningf("the webhook cache ttl of %s is shorter than the overall cache ttl of %s for successful token authentication attempts.", s.WebHook.CacheTTL, s.TokenSuccessCacheTTL)
 			}
 			if s.TokenFailureCacheTTL > 0 && s.WebHook.CacheTTL < s.TokenFailureCacheTTL {
-				glog.Warningf("the webhook cache ttl of %s is shorter than the overall cache ttl of %s for failed token authentication attempts.", s.WebHook.CacheTTL, s.TokenFailureCacheTTL)
+				klog.Warningf("the webhook cache ttl of %s is shorter than the overall cache ttl of %s for failed token authentication attempts.", s.WebHook.CacheTTL, s.TokenFailureCacheTTL)
 			}
 		}
 	}
 
-	return ret
+	return ret, nil
 }
 
-func (o *BuiltInAuthenticationOptions) ApplyTo(c *genericapiserver.Config) error {
+// ApplyTo requires already applied OpenAPIConfig and EgressSelector if present.
+func (o *BuiltInAuthenticationOptions) ApplyTo(authInfo *genericapiserver.AuthenticationInfo, secureServing *genericapiserver.SecureServingInfo, egressSelector *egressselector.EgressSelector, openAPIConfig *openapicommon.Config, extclient kubernetes.Interface, versionedInformer informers.SharedInformerFactory) error {
 	if o == nil {
 		return nil
 	}
 
-	var err error
-	if o.ClientCert != nil {
-		if err = c.Authentication.ApplyClientCert(o.ClientCert.ClientCA, c.SecureServing); err != nil {
+	if openAPIConfig == nil {
+		return errors.New("uninitialized OpenAPIConfig")
+	}
+
+	authenticatorConfig, err := o.ToAuthenticationConfig()
+	if err != nil {
+		return err
+	}
+
+	if authenticatorConfig.ClientCAContentProvider != nil {
+		if err = authInfo.ApplyClientCert(authenticatorConfig.ClientCAContentProvider, secureServing); err != nil {
 			return fmt.Errorf("unable to load client CA file: %v", err)
 		}
 	}
-	if o.RequestHeader != nil {
-		if err = c.Authentication.ApplyClientCert(o.RequestHeader.ClientCAFile, c.SecureServing); err != nil {
+	if authenticatorConfig.RequestHeaderConfig != nil && authenticatorConfig.RequestHeaderConfig.CAContentProvider != nil {
+		if err = authInfo.ApplyClientCert(authenticatorConfig.RequestHeaderConfig.CAContentProvider, secureServing); err != nil {
 			return fmt.Errorf("unable to load client CA file: %v", err)
 		}
 	}
 
-	c.Authentication.SupportsBasicAuth = o.PasswordFile != nil && len(o.PasswordFile.BasicAuthFile) > 0
+	authInfo.APIAudiences = o.APIAudiences
+	if o.ServiceAccounts != nil && o.ServiceAccounts.Issuer != "" && len(o.APIAudiences) == 0 {
+		authInfo.APIAudiences = authenticator.Audiences{o.ServiceAccounts.Issuer}
+	}
+
+	if o.ServiceAccounts.Lookup || utilfeature.DefaultFeatureGate.Enabled(features.TokenRequest) {
+		authenticatorConfig.ServiceAccountTokenGetter = serviceaccountcontroller.NewGetterFromClient(
+			extclient,
+			versionedInformer.Core().V1().Secrets().Lister(),
+			versionedInformer.Core().V1().ServiceAccounts().Lister(),
+			versionedInformer.Core().V1().Pods().Lister(),
+		)
+	}
+	authenticatorConfig.BootstrapTokenAuthenticator = bootstrap.NewTokenAuthenticator(
+		versionedInformer.Core().V1().Secrets().Lister().Secrets(metav1.NamespaceSystem),
+	)
+
+	if egressSelector != nil {
+		egressDialer, err := egressSelector.Lookup(egressselector.Master.AsNetworkContext())
+		if err != nil {
+			return err
+		}
+		authenticatorConfig.CustomDial = egressDialer
+	}
+
+	authInfo.Authenticator, openAPIConfig.SecurityDefinitions, err = authenticatorConfig.New()
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -375,7 +481,7 @@ func (o *BuiltInAuthenticationOptions) ApplyAuthorization(authorization *BuiltIn
 	// authorization ModeAlwaysAllow cannot be combined with AnonymousAuth.
 	// in such a case the AnonymousAuth is stomped to false and you get a message
 	if o.Anonymous.Allow && sets.NewString(authorization.Modes...).Has(authzmodes.ModeAlwaysAllow) {
-		glog.Warningf("AnonymousAuth is not allowed with the AlwaysAllow authorizer. Resetting AnonymousAuth to false. You should use a different authorizer")
+		klog.Warningf("AnonymousAuth is not allowed with the AlwaysAllow authorizer. Resetting AnonymousAuth to false. You should use a different authorizer")
 		o.Anonymous.Allow = false
 	}
 }

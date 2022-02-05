@@ -50,7 +50,7 @@ oc login "${MASTER_ADDR}" -u new-app -p password --certificate-authority="${MAST
 oc new-project new-app
 oc delete all --all
 
-# create a local-only docker image for testing
+# create a local-only container image for testing
 # image is removed in cleanup()
 tmp=$(mktemp -d)
 pushd "${tmp}"
@@ -63,7 +63,7 @@ popd
 rm -rf "${tmp}"
 
 
-# ensure a local-only image gets a docker image(not imagestream) reference created.
+# ensure a local-only image gets a container image(not imagestream) reference created.
 VERBOSE=true os::cmd::expect_success "oc new-project test-scratchimage"
 os::cmd::expect_success "oc new-app test/scratchimage~https://github.com/openshift/ruby-hello-world.git --strategy=docker"
 os::cmd::expect_success_and_text "oc get bc ruby-hello-world -o jsonpath={.spec.strategy.dockerStrategy.from.kind}" "DockerImage"
@@ -108,8 +108,8 @@ DOCKER_CONFIG_JSON="${HOME}/.docker/config.json"
 VERBOSE=true os::cmd::expect_success "oc new-project dc-ns"
 os::cmd::expect_success "oc delete all --all"
 os::cmd::expect_success "oc delete secrets --all"
-os::cmd::expect_success "oc secrets new image-ns-pull .dockerconfigjson=${DOCKER_CONFIG_JSON}"
-os::cmd::expect_success "oc secrets new-dockercfg image-ns-pull-old --docker-email=fake@example.org --docker-username=imagensbuilder --docker-server=${docker_registry} --docker-password=${token}"
+os::cmd::expect_success "oc create secret generic image-ns-pull --from-file=.dockerconfigjson=${DOCKER_CONFIG_JSON} --type=kubernetes.io/dockerconfigjson"
+os::cmd::expect_success "oc create secret docker-registry image-ns-pull-old --docker-email=fake@example.org --docker-username=imagensbuilder --docker-server=${docker_registry} --docker-password=${token}"
 
 os::cmd::expect_success "oc process -f test/extended/testdata/image-pull-secrets/pod-with-no-pull-secret.yaml --param=DOCKER_REGISTRY=${docker_registry} | oc create -f - "
 os::cmd::try_until_text "oc describe pod/no-pull-pod" "Back-off pulling image"

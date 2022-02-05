@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -18,10 +19,10 @@ import (
 
 const timeoutSeconds = 3 * 60
 
-var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
+var _ = g.Describe("[sig-network][Feature:Router]", func() {
 	defer g.GinkgoRecover()
 	var (
-		configPath = exutil.FixturePath("testdata", "router-config-manager.yaml")
+		configPath = exutil.FixturePath("testdata", "router", "router-config-manager.yaml")
 		oc         *exutil.CLI
 		ns         string
 	)
@@ -30,23 +31,23 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 	// hook
 	g.AfterEach(func() {
 		if g.CurrentGinkgoTestDescription().Failed {
-			client := routeclientset.NewForConfigOrDie(oc.AdminConfig()).Route().Routes(ns)
-			if routes, _ := client.List(metav1.ListOptions{}); routes != nil {
+			client := routeclientset.NewForConfigOrDie(oc.AdminConfig()).RouteV1().Routes(ns)
+			if routes, _ := client.List(context.Background(), metav1.ListOptions{}); routes != nil {
 				outputIngress(routes.Items...)
 			}
 			exutil.DumpPodLogsStartingWith("router-", oc)
 		}
 	})
 
-	oc = exutil.NewCLI("router-config-manager", exutil.KubeConfigPath())
+	oc = exutil.NewCLI("router-config-manager")
 
 	g.BeforeEach(func() {
 		ns = oc.Namespace()
 
-		routerImage, _ := exutil.FindImageFormatString(oc)
-		routerImage = strings.Replace(routerImage, "${component}", "haproxy-router", -1)
+		routerImage, err := exutil.FindRouterImage(oc)
+		o.Expect(err).NotTo(o.HaveOccurred())
 
-		err := oc.AsAdmin().Run("new-app").Args("-f", configPath, "-p", "IMAGE="+routerImage).Execute()
+		err = oc.AsAdmin().Run("new-app").Args("-f", configPath, "-p", "IMAGE="+routerImage).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
 	})
 
@@ -55,13 +56,15 @@ var _ = g.Describe("[Conformance][Area:Networking][Feature:Router]", func() {
 			g.Skip("TODO: This test is flaking, fix it")
 			ns := oc.KubeFramework().Namespace.Name
 			execPodName := exutil.CreateExecPodOrFail(oc.AdminKubeClient().CoreV1(), ns, "execpod")
-			defer func() { oc.AdminKubeClient().CoreV1().Pods(ns).Delete(execPodName, metav1.NewDeleteOptions(1)) }()
+			defer func() {
+				oc.AdminKubeClient().CoreV1().Pods(ns).Delete(context.Background(), execPodName, *metav1.NewDeleteOptions(1))
+			}()
 
 			g.By(fmt.Sprintf("creating a router with haproxy config manager from a config file %q", configPath))
 
 			var routerIP string
 			err := wait.Poll(time.Second, timeoutSeconds*time.Second, func() (bool, error) {
-				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(oc.KubeFramework().Namespace.Name).Get("router-haproxy-cfgmgr", metav1.GetOptions{})
+				pod, err := oc.KubeFramework().ClientSet.CoreV1().Pods(oc.KubeFramework().Namespace.Name).Get(context.Background(), "router-haproxy-cfgmgr", metav1.GetOptions{})
 				if err != nil {
 					return false, err
 				}
@@ -139,8 +142,10 @@ func waitForRouteToRespond(ns, execPodName, proto, host, abspath, ipaddr string,
 	uri := fmt.Sprintf("%s://%s:%d%s", proto, host, port, abspath)
 	cmd := fmt.Sprintf(`
 		set -e
-		for i in $(seq 1 %d); do
-			code=$( curl -k -s -o /dev/null -w '%%{http_code}\n' --resolve %s:%d:%s %q ) || rc=$?
+		STOP=$(($(date '+%%s') + %d))
+		while [ $(date '+%%s') -lt $STOP ]; do
+			rc=0
+			code=$( curl -k -s -m 5 -o /dev/null -w '%%{http_code}\n' --resolve %s:%d:%s %q ) || rc=$?
 			if [[ "${rc:-0}" -eq 0 ]]; then
 				echo $code
 				if [[ $code -eq 200 ]]; then

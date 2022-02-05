@@ -1,6 +1,7 @@
 package image_ecosystem
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -16,12 +17,12 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[image_ecosystem][perl][Slow] hot deploy for openshift perl image", func() {
+var _ = g.Describe("[sig-devex][Feature:ImageEcosystem][perl][Slow] hot deploy for openshift perl image", func() {
 	defer g.GinkgoRecover()
 	var (
 		appSource     = exutil.FixturePath("testdata", "image_ecosystem", "perl-hotdeploy")
 		perlTemplate  = exutil.FixturePath("testdata", "image_ecosystem", "perl-hotdeploy", "perl.json")
-		oc            = exutil.NewCLI("s2i-perl", exutil.KubeConfigPath())
+		oc            = exutil.NewCLI("s2i-perl")
 		modifyCommand = []string{"sed", "-ie", `s/initial value/modified value/`, "lib/My/Test.pm"}
 		dcName        = "perl"
 		rcNameOne     = fmt.Sprintf("%s-1", dcName)
@@ -31,15 +32,8 @@ var _ = g.Describe("[image_ecosystem][perl][Slow] hot deploy for openshift perl 
 	)
 
 	g.Context("", func() {
-		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
-
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
-			g.By("waiting for builder service account")
-			err = exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "builder")
-			o.Expect(err).NotTo(o.HaveOccurred())
+		g.JustBeforeEach(func() {
+			exutil.PreTestDump()
 		})
 
 		g.AfterEach(func() {
@@ -52,7 +46,7 @@ var _ = g.Describe("[image_ecosystem][perl][Slow] hot deploy for openshift perl 
 		g.Describe("hot deploy test", func() {
 			g.It("should work", func() {
 
-				exutil.CheckOpenShiftNamespaceImageStreams(oc)
+				exutil.WaitForOpenShiftNamespaceImageStreams(oc)
 				g.By(fmt.Sprintf("calling oc new-app -f %q", perlTemplate))
 				err := oc.Run("new-app").Args("-f", perlTemplate, "-e", "HTTPD_START_SERVERS=1", "-e", "HTTPD_MAX_SPARE_SERVERS=1", "-e", "HTTPD_MAX_REQUEST_WORKERS=1").Execute()
 				o.Expect(err).NotTo(o.HaveOccurred())
@@ -62,7 +56,7 @@ var _ = g.Describe("[image_ecosystem][perl][Slow] hot deploy for openshift perl 
 				br.AssertSuccess()
 
 				g.By("waiting for build to finish")
-				err = exutil.WaitForABuild(oc.BuildClient().Build().Builds(oc.Namespace()), rcNameOne, nil, nil, nil)
+				err = exutil.WaitForABuild(oc.BuildClient().BuildV1().Builds(oc.Namespace()), rcNameOne, nil, nil, nil)
 				if err != nil {
 					exutil.DumpBuildLogs(dcName, oc)
 				}
@@ -72,13 +66,13 @@ var _ = g.Describe("[image_ecosystem][perl][Slow] hot deploy for openshift perl 
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for endpoint")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
 				o.Expect(err).NotTo(o.HaveOccurred())
-				oldEndpoint, err := oc.KubeFramework().ClientSet.Core().Endpoints(oc.Namespace()).Get(dcName, metav1.GetOptions{})
+				oldEndpoint, err := oc.KubeFramework().ClientSet.CoreV1().Endpoints(oc.Namespace()).Get(context.Background(), dcName, metav1.GetOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				checkPage := func(expected string, dcLabel labels.Selector) {
-					_, err := exutil.WaitForPods(oc.KubeClient().Core().Pods(oc.Namespace()), dcLabel, exutil.CheckPodIsRunning, 1, 4*time.Minute)
+					_, err := exutil.WaitForPods(oc.KubeClient().CoreV1().Pods(oc.Namespace()), dcLabel, exutil.CheckPodIsRunning, 1, 4*time.Minute)
 					o.ExpectWithOffset(1, err).NotTo(o.HaveOccurred())
 					result, err := CheckPageContains(oc, dcName, "", expected)
 					o.ExpectWithOffset(1, err).NotTo(o.HaveOccurred())
@@ -99,14 +93,14 @@ var _ = g.Describe("[image_ecosystem][perl][Slow] hot deploy for openshift perl 
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for a new endpoint")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				// Ran into an issue where we'd try to hit the endpoint before it was updated, resulting in
 				// request timeouts against the previous pod's ip.  So make sure the endpoint is pointing to the
 				// new pod before hitting it.
 				err = wait.Poll(1*time.Second, 1*time.Minute, func() (bool, error) {
-					newEndpoint, err := oc.KubeFramework().ClientSet.Core().Endpoints(oc.Namespace()).Get(dcName, metav1.GetOptions{})
+					newEndpoint, err := oc.KubeFramework().ClientSet.CoreV1().Endpoints(oc.Namespace()).Get(context.Background(), dcName, metav1.GetOptions{})
 					if err != nil {
 						return false, err
 					}

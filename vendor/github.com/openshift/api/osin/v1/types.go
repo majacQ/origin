@@ -7,16 +7,55 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 )
 
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+type OsinServerConfig struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// provides the standard apiserver configuration
+	configv1.GenericAPIServerConfig `json:",inline"`
+
+	// oauthConfig holds the necessary configuration options for OAuth authentication
+	OAuthConfig OAuthConfig `json:"oauthConfig"`
+}
+
 // OAuthConfig holds the necessary configuration options for OAuth authentication
 type OAuthConfig struct {
 	// masterCA is the CA for verifying the TLS connection back to the MasterURL.
+	// This field is deprecated and will be removed in a future release.
+	// See loginURL for details.
+	// Deprecated
 	MasterCA *string `json:"masterCA"`
 
 	// masterURL is used for making server-to-server calls to exchange authorization codes for access tokens
+	// This field is deprecated and will be removed in a future release.
+	// See loginURL for details.
+	// Deprecated
 	MasterURL string `json:"masterURL"`
 
 	// masterPublicURL is used for building valid client redirect URLs for internal and external access
+	// This field is deprecated and will be removed in a future release.
+	// See loginURL for details.
+	// Deprecated
 	MasterPublicURL string `json:"masterPublicURL"`
+
+	// loginURL, along with masterCA, masterURL and masterPublicURL have distinct
+	// meanings depending on how the OAuth server is run.  The two states are:
+	// 1. embedded in the kube api server (all 3.x releases)
+	// 2. as a standalone external process (all 4.x releases)
+	// in the embedded configuration, loginURL is equivalent to masterPublicURL
+	// and the other fields have functionality that matches their docs.
+	// in the standalone configuration, the fields are used as:
+	// loginURL is the URL required to login to the cluster:
+	// oc login --server=<loginURL>
+	// masterPublicURL is the issuer URL
+	// it is accessible from inside (service network) and outside (ingress) of the cluster
+	// masterURL is the loopback variation of the token_endpoint URL with no path component
+	// it is only accessible from inside (service network) of the cluster
+	// masterCA is used to perform TLS verification for connections made to masterURL
+	// For further details, see the IETF Draft:
+	// https://tools.ietf.org/html/draft-ietf-oauth-discovery-04#section-2
+	LoginURL string `json:"loginURL"`
 
 	// assetPublicURL is used for building valid client redirect URLs for external access
 	AssetPublicURL string `json:"assetPublicURL"`
@@ -66,6 +105,7 @@ type IdentityProvider struct {
 	// mappingMethod determines how identities from this provider are mapped to users
 	MappingMethod string `json:"mappingMethod"`
 	// provider contains the information about how to set up a specific identity provider
+	// +kubebuilder:pruning:PreserveUnknownFields
 	Provider runtime.RawExtension `json:"provider"`
 }
 
@@ -352,20 +392,43 @@ type SessionConfig struct {
 // TokenConfig holds the necessary configuration options for authorization and access tokens
 type TokenConfig struct {
 	// authorizeTokenMaxAgeSeconds defines the maximum age of authorize tokens
-	AuthorizeTokenMaxAgeSeconds int32 `json:"authorizeTokenMaxAgeSeconds"`
+	AuthorizeTokenMaxAgeSeconds int32 `json:"authorizeTokenMaxAgeSeconds,omitempty"`
 	// accessTokenMaxAgeSeconds defines the maximum age of access tokens
-	AccessTokenMaxAgeSeconds int32 `json:"accessTokenMaxAgeSeconds"`
-	// accessTokenInactivityTimeoutSeconds defined the default token
-	// inactivity timeout for tokens granted by any client.
-	// Setting it to nil means the feature is completely disabled (default)
-	// The default setting can be overriden on OAuthClient basis.
+	AccessTokenMaxAgeSeconds int32 `json:"accessTokenMaxAgeSeconds,omitempty"`
+	// accessTokenInactivityTimeoutSeconds - DEPRECATED: setting this field has no effect.
+	// +optional
+	AccessTokenInactivityTimeoutSeconds *int32 `json:"accessTokenInactivityTimeoutSeconds,omitempty"`
+	// accessTokenInactivityTimeout defines the token inactivity timeout
+	// for tokens granted by any client.
 	// The value represents the maximum amount of time that can occur between
 	// consecutive uses of the token. Tokens become invalid if they are not
 	// used within this temporal window. The user will need to acquire a new
-	// token to regain access once a token times out.
-	// Valid values are:
-	// - 0: Tokens never time out
-	// - X: Tokens time out if there is no activity for X seconds
-	// The current minimum allowed value for X is 300 (5 minutes)
-	AccessTokenInactivityTimeoutSeconds *int32 `json:"accessTokenInactivityTimeoutSeconds,omitempty"`
+	// token to regain access once a token times out. Takes valid time
+	// duration string such as "5m", "1.5h" or "2h45m". The minimum allowed
+	// value for duration is 300s (5 minutes). If the timeout is configured
+	// per client, then that value takes precedence. If the timeout value is
+	// not specified and the client does not override the value, then tokens
+	// are valid until their lifetime.
+	// +optional
+	AccessTokenInactivityTimeout *metav1.Duration `json:"accessTokenInactivityTimeout,omitempty"`
+}
+
+// +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
+
+// SessionSecrets list the secrets to use to sign/encrypt and authenticate/decrypt created sessions.
+type SessionSecrets struct {
+	metav1.TypeMeta `json:",inline"`
+
+	// Secrets is a list of secrets
+	// New sessions are signed and encrypted using the first secret.
+	// Existing sessions are decrypted/authenticated by each secret until one succeeds. This allows rotating secrets.
+	Secrets []SessionSecret `json:"secrets"`
+}
+
+// SessionSecret is a secret used to authenticate/decrypt cookie-based sessions
+type SessionSecret struct {
+	// Authentication is used to authenticate sessions using HMAC. Recommended to use a secret with 32 or 64 bytes.
+	Authentication string `json:"authentication"`
+	// Encryption is used to encrypt sessions. Must be 16, 24, or 32 characters long, to select AES-128, AES-
+	Encryption string `json:"encryption"`
 }

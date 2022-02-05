@@ -11,25 +11,22 @@ import (
 	"time"
 
 	jsonserializer "k8s.io/apimachinery/pkg/runtime/serializer/json"
-	"k8s.io/kubernetes/pkg/kubectl/scheme"
+	"k8s.io/kubectl/pkg/scheme"
 
-	"github.com/coreos/etcd/clientv3"
-	"github.com/coreos/etcd/pkg/transport"
+	"go.etcd.io/etcd/clientv3"
+	"go.etcd.io/etcd/pkg/transport"
 
-	// install all APIs
-	install "github.com/openshift/origin/pkg/api/install"
-	"github.com/openshift/origin/pkg/api/legacy"
+	"github.com/openshift/api"
 )
 
 func init() {
-	install.InstallInternalOpenShift(scheme.Scheme)
-	install.InstallInternalKube(scheme.Scheme)
-	legacy.InstallInternalLegacyAll(scheme.Scheme)
+	api.Install(scheme.Scheme)
+	api.InstallKube(scheme.Scheme)
 }
 
 func main() {
 	var endpoint, keyFile, certFile, caFile string
-	flag.StringVar(&endpoint, "endpoint", "https://127.0.0.1:4001", "Etcd endpoint.")
+	flag.StringVar(&endpoint, "endpoint", "https://127.0.0.1:2379", "etcd endpoint.")
 	flag.StringVar(&keyFile, "key", "", "TLS client key.")
 	flag.StringVar(&certFile, "cert", "", "TLS client certificate.")
 	flag.StringVar(&caFile, "cacert", "", "Server TLS CA certificate.")
@@ -56,9 +53,9 @@ func main() {
 	var tlsConfig *tls.Config
 	if len(certFile) != 0 || len(keyFile) != 0 || len(caFile) != 0 {
 		tlsInfo := transport.TLSInfo{
-			CertFile: certFile,
-			KeyFile:  keyFile,
-			CAFile:   caFile,
+			CertFile:      certFile,
+			KeyFile:       keyFile,
+			TrustedCAFile: caFile,
 		}
 		var err error
 		tlsConfig, err = tlsInfo.ClientConfig()

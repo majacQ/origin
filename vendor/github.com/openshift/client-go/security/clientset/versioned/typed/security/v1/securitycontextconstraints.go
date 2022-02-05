@@ -3,9 +3,12 @@
 package v1
 
 import (
+	"context"
+	"time"
+
 	v1 "github.com/openshift/api/security/v1"
 	scheme "github.com/openshift/client-go/security/clientset/versioned/scheme"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	watch "k8s.io/apimachinery/pkg/watch"
 	rest "k8s.io/client-go/rest"
@@ -19,14 +22,14 @@ type SecurityContextConstraintsGetter interface {
 
 // SecurityContextConstraintsInterface has methods to work with SecurityContextConstraints resources.
 type SecurityContextConstraintsInterface interface {
-	Create(*v1.SecurityContextConstraints) (*v1.SecurityContextConstraints, error)
-	Update(*v1.SecurityContextConstraints) (*v1.SecurityContextConstraints, error)
-	Delete(name string, options *meta_v1.DeleteOptions) error
-	DeleteCollection(options *meta_v1.DeleteOptions, listOptions meta_v1.ListOptions) error
-	Get(name string, options meta_v1.GetOptions) (*v1.SecurityContextConstraints, error)
-	List(opts meta_v1.ListOptions) (*v1.SecurityContextConstraintsList, error)
-	Watch(opts meta_v1.ListOptions) (watch.Interface, error)
-	Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1.SecurityContextConstraints, err error)
+	Create(ctx context.Context, securityContextConstraints *v1.SecurityContextConstraints, opts metav1.CreateOptions) (*v1.SecurityContextConstraints, error)
+	Update(ctx context.Context, securityContextConstraints *v1.SecurityContextConstraints, opts metav1.UpdateOptions) (*v1.SecurityContextConstraints, error)
+	Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error
+	DeleteCollection(ctx context.Context, opts metav1.DeleteOptions, listOpts metav1.ListOptions) error
+	Get(ctx context.Context, name string, opts metav1.GetOptions) (*v1.SecurityContextConstraints, error)
+	List(ctx context.Context, opts metav1.ListOptions) (*v1.SecurityContextConstraintsList, error)
+	Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error)
+	Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (result *v1.SecurityContextConstraints, err error)
 	SecurityContextConstraintsExpansion
 }
 
@@ -43,89 +46,107 @@ func newSecurityContextConstraints(c *SecurityV1Client) *securityContextConstrai
 }
 
 // Get takes name of the securityContextConstraints, and returns the corresponding securityContextConstraints object, and an error if there is any.
-func (c *securityContextConstraints) Get(name string, options meta_v1.GetOptions) (result *v1.SecurityContextConstraints, err error) {
+func (c *securityContextConstraints) Get(ctx context.Context, name string, options metav1.GetOptions) (result *v1.SecurityContextConstraints, err error) {
 	result = &v1.SecurityContextConstraints{}
 	err = c.client.Get().
 		Resource("securitycontextconstraints").
 		Name(name).
 		VersionedParams(&options, scheme.ParameterCodec).
-		Do().
+		Do(ctx).
 		Into(result)
 	return
 }
 
 // List takes label and field selectors, and returns the list of SecurityContextConstraints that match those selectors.
-func (c *securityContextConstraints) List(opts meta_v1.ListOptions) (result *v1.SecurityContextConstraintsList, err error) {
+func (c *securityContextConstraints) List(ctx context.Context, opts metav1.ListOptions) (result *v1.SecurityContextConstraintsList, err error) {
+	var timeout time.Duration
+	if opts.TimeoutSeconds != nil {
+		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
+	}
 	result = &v1.SecurityContextConstraintsList{}
 	err = c.client.Get().
 		Resource("securitycontextconstraints").
 		VersionedParams(&opts, scheme.ParameterCodec).
-		Do().
+		Timeout(timeout).
+		Do(ctx).
 		Into(result)
 	return
 }
 
 // Watch returns a watch.Interface that watches the requested securityContextConstraints.
-func (c *securityContextConstraints) Watch(opts meta_v1.ListOptions) (watch.Interface, error) {
+func (c *securityContextConstraints) Watch(ctx context.Context, opts metav1.ListOptions) (watch.Interface, error) {
+	var timeout time.Duration
+	if opts.TimeoutSeconds != nil {
+		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
+	}
 	opts.Watch = true
 	return c.client.Get().
 		Resource("securitycontextconstraints").
 		VersionedParams(&opts, scheme.ParameterCodec).
-		Watch()
+		Timeout(timeout).
+		Watch(ctx)
 }
 
 // Create takes the representation of a securityContextConstraints and creates it.  Returns the server's representation of the securityContextConstraints, and an error, if there is any.
-func (c *securityContextConstraints) Create(securityContextConstraints *v1.SecurityContextConstraints) (result *v1.SecurityContextConstraints, err error) {
+func (c *securityContextConstraints) Create(ctx context.Context, securityContextConstraints *v1.SecurityContextConstraints, opts metav1.CreateOptions) (result *v1.SecurityContextConstraints, err error) {
 	result = &v1.SecurityContextConstraints{}
 	err = c.client.Post().
 		Resource("securitycontextconstraints").
+		VersionedParams(&opts, scheme.ParameterCodec).
 		Body(securityContextConstraints).
-		Do().
+		Do(ctx).
 		Into(result)
 	return
 }
 
 // Update takes the representation of a securityContextConstraints and updates it. Returns the server's representation of the securityContextConstraints, and an error, if there is any.
-func (c *securityContextConstraints) Update(securityContextConstraints *v1.SecurityContextConstraints) (result *v1.SecurityContextConstraints, err error) {
+func (c *securityContextConstraints) Update(ctx context.Context, securityContextConstraints *v1.SecurityContextConstraints, opts metav1.UpdateOptions) (result *v1.SecurityContextConstraints, err error) {
 	result = &v1.SecurityContextConstraints{}
 	err = c.client.Put().
 		Resource("securitycontextconstraints").
 		Name(securityContextConstraints.Name).
+		VersionedParams(&opts, scheme.ParameterCodec).
 		Body(securityContextConstraints).
-		Do().
+		Do(ctx).
 		Into(result)
 	return
 }
 
 // Delete takes name of the securityContextConstraints and deletes it. Returns an error if one occurs.
-func (c *securityContextConstraints) Delete(name string, options *meta_v1.DeleteOptions) error {
+func (c *securityContextConstraints) Delete(ctx context.Context, name string, opts metav1.DeleteOptions) error {
 	return c.client.Delete().
 		Resource("securitycontextconstraints").
 		Name(name).
-		Body(options).
-		Do().
+		Body(&opts).
+		Do(ctx).
 		Error()
 }
 
 // DeleteCollection deletes a collection of objects.
-func (c *securityContextConstraints) DeleteCollection(options *meta_v1.DeleteOptions, listOptions meta_v1.ListOptions) error {
+func (c *securityContextConstraints) DeleteCollection(ctx context.Context, opts metav1.DeleteOptions, listOpts metav1.ListOptions) error {
+	var timeout time.Duration
+	if listOpts.TimeoutSeconds != nil {
+		timeout = time.Duration(*listOpts.TimeoutSeconds) * time.Second
+	}
 	return c.client.Delete().
 		Resource("securitycontextconstraints").
-		VersionedParams(&listOptions, scheme.ParameterCodec).
-		Body(options).
-		Do().
+		VersionedParams(&listOpts, scheme.ParameterCodec).
+		Timeout(timeout).
+		Body(&opts).
+		Do(ctx).
 		Error()
 }
 
 // Patch applies the patch and returns the patched securityContextConstraints.
-func (c *securityContextConstraints) Patch(name string, pt types.PatchType, data []byte, subresources ...string) (result *v1.SecurityContextConstraints, err error) {
+func (c *securityContextConstraints) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (result *v1.SecurityContextConstraints, err error) {
 	result = &v1.SecurityContextConstraints{}
 	err = c.client.Patch(pt).
 		Resource("securitycontextconstraints").
-		SubResource(subresources...).
 		Name(name).
+		SubResource(subresources...).
+		VersionedParams(&opts, scheme.ParameterCodec).
 		Body(data).
-		Do().
+		Do(ctx).
 		Into(result)
 	return
 }

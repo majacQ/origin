@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -19,11 +20,11 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[cli][Slow] can use rsync to upload files to pods", func() {
+var _ = g.Describe("[sig-cli][Slow] can use rsync to upload files to pods", func() {
 	defer g.GinkgoRecover()
 
 	var (
-		oc           = exutil.NewCLI("cli-rsync", exutil.KubeConfigPath())
+		oc           = exutil.NewCLI("cli-rsync")
 		templatePath = exutil.FixturePath("..", "..", "examples", "db-templates", "mariadb-ephemeral-template.json")
 		sourcePath1  = exutil.FixturePath("..", "..", "examples", "image-streams")
 		sourcePath2  = exutil.FixturePath("..", "..", "examples", "sample-app")
@@ -38,12 +39,12 @@ var _ = g.Describe("[cli][Slow] can use rsync to upload files to pods", func() {
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("expecting the mariadb service get endpoints")
-		err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mariadb")
+		err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mariadb")
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		g.By("Getting the mariadb pod name")
 		selector, _ := labels.Parse("name=mariadb")
-		pods, err := oc.KubeClient().Core().Pods(oc.Namespace()).List(metav1.ListOptions{LabelSelector: selector.String()})
+		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(context.Background(), metav1.ListOptions{LabelSelector: selector.String()})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		o.Expect(len(pods.Items)).ToNot(o.BeZero())
 		podName = pods.Items[0].Name
@@ -301,18 +302,18 @@ var _ = g.Describe("[cli][Slow] can use rsync to upload files to pods", func() {
 		})
 
 		g.It("should honor multiple --exclude flags", func() {
-			g.By(fmt.Sprintf("Calling oc rsync %s %s:/tmp --exclude=application-template-custombuild.json --exclude=application-template-dockerbuild.json", sourcePath2, podName))
+			g.By(fmt.Sprintf("Calling oc rsync %s %s:/tmp --exclude=application-template-pullspecbuild.json --exclude=application-template-dockerbuild.json", sourcePath2, podName))
 			err := oc.Run("rsync").Args(
 				sourcePath2,
 				fmt.Sprintf("%s:/tmp", podName),
-				"--exclude=application-template-custombuild.json",
+				"--exclude=application-template-pullspecbuild.json",
 				"--exclude=application-template-dockerbuild.json").Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("Verifying that files are copied to the container")
 			result, err := oc.Run("rsh").Args(podName, "ls", "/tmp/sample-app").Output()
 			o.Expect(err).NotTo(o.HaveOccurred())
-			o.Expect(result).NotTo(o.ContainSubstring("application-template-custombuild.json"))
+			o.Expect(result).NotTo(o.ContainSubstring("application-template-pullspecbuild.json"))
 			o.Expect(result).NotTo(o.ContainSubstring("application-template-dockerbuild.json"))
 			o.Expect(result).To(o.ContainSubstring("application-template-stibuild.json"))
 		})
@@ -334,21 +335,21 @@ var _ = g.Describe("[cli][Slow] can use rsync to upload files to pods", func() {
 		})
 
 		g.It("should honor multiple --include flags", func() {
-			g.By(fmt.Sprintf("Calling oc rsync %s %s:/tmp --exclude=*.json --include=application-template-custombuild.json --include=application-template-dockerbuild.json", sourcePath2, podName))
+			g.By(fmt.Sprintf("Calling oc rsync %s %s:/tmp --exclude=*.json --include=application-template-stibuild.json --include=application-template-dockerbuild.json", sourcePath2, podName))
 			err := oc.Run("rsync").Args(
 				sourcePath2,
 				fmt.Sprintf("%s:/tmp", podName),
 				"--exclude=*.json",
-				"--include=application-template-custombuild.json",
+				"--include=application-template-stibuild.json",
 				"--include=application-template-dockerbuild.json").Execute()
 			o.Expect(err).NotTo(o.HaveOccurred())
 
 			g.By("Verifying that files are copied to the container")
 			result, err := oc.Run("rsh").Args(podName, "ls", "/tmp/sample-app").Output()
 			o.Expect(err).NotTo(o.HaveOccurred())
-			o.Expect(result).To(o.ContainSubstring("application-template-custombuild.json"))
+			o.Expect(result).To(o.ContainSubstring("application-template-stibuild.json"))
 			o.Expect(result).To(o.ContainSubstring("application-template-dockerbuild.json"))
-			o.Expect(result).NotTo(o.ContainSubstring("application-template-stibuild.json"))
+			o.Expect(result).NotTo(o.ContainSubstring("application-template-pullspecbuild.json"))
 		})
 
 		g.It("should honor the --progress flag", func() {

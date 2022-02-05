@@ -3,10 +3,11 @@ package leaderelection
 import (
 	"fmt"
 	"io/ioutil"
+	"os"
 	"strings"
 	"time"
 
-	"github.com/golang/glog"
+	"k8s.io/klog/v2"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
@@ -29,7 +30,13 @@ func ToConfigMapLeaderElection(clientConfig *rest.Config, config configv1.Leader
 	}
 
 	if len(identity) == 0 {
-		identity = string(uuid.NewUUID())
+		if hostname, err := os.Hostname(); err != nil {
+			// on errors, make sure we're unique
+			identity = string(uuid.NewUUID())
+		} else {
+			// add a uniquifier so that two processes on the same host don't accidentally both become active
+			identity = hostname + "_" + string(uuid.NewUUID())
+		}
 	}
 	if len(config.Namespace) == 0 {
 		return leaderelection.LeaderElectionConfig{}, fmt.Errorf("namespace may not be empty")
@@ -39,7 +46,7 @@ func ToConfigMapLeaderElection(clientConfig *rest.Config, config configv1.Leader
 	}
 
 	eventBroadcaster := record.NewBroadcaster()
-	eventBroadcaster.StartLogging(glog.Infof)
+	eventBroadcaster.StartLogging(klog.Infof)
 	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: v1core.New(kubeClient.CoreV1().RESTClient()).Events("")})
 	eventRecorder := eventBroadcaster.NewRecorder(clientgoscheme.Scheme, corev1.EventSource{Component: component})
 	rl, err := resourcelock.New(
@@ -47,6 +54,7 @@ func ToConfigMapLeaderElection(clientConfig *rest.Config, config configv1.Leader
 		config.Namespace,
 		config.Name,
 		kubeClient.CoreV1(),
+		kubeClient.CoordinationV1(),
 		resourcelock.ResourceLockConfig{
 			Identity:      identity,
 			EventRecorder: eventRecorder,
@@ -56,13 +64,15 @@ func ToConfigMapLeaderElection(clientConfig *rest.Config, config configv1.Leader
 	}
 
 	return leaderelection.LeaderElectionConfig{
-		Lock:          rl,
-		LeaseDuration: config.LeaseDuration.Duration,
-		RenewDeadline: config.RenewDeadline.Duration,
-		RetryPeriod:   config.RetryPeriod.Duration,
+		Lock:            rl,
+		ReleaseOnCancel: true,
+		LeaseDuration:   config.LeaseDuration.Duration,
+		RenewDeadline:   config.RenewDeadline.Duration,
+		RetryPeriod:     config.RetryPeriod.Duration,
 		Callbacks: leaderelection.LeaderCallbacks{
 			OnStoppedLeading: func() {
-				glog.Fatalf("leaderelection lost")
+				defer os.Exit(0)
+				klog.Warningf("leader election lost")
 			},
 		},
 	}, nil
@@ -75,13 +85,13 @@ func LeaderElectionDefaulting(config configv1.LeaderElection, defaultNamespace, 
 	ret := *(&config).DeepCopy()
 
 	if ret.LeaseDuration.Duration == 0 {
-		ret.LeaseDuration.Duration = 15 * time.Second
+		ret.LeaseDuration.Duration = 60 * time.Second
 	}
 	if ret.RenewDeadline.Duration == 0 {
-		ret.RenewDeadline.Duration = 10 * time.Second
+		ret.RenewDeadline.Duration = 35 * time.Second
 	}
 	if ret.RetryPeriod.Duration == 0 {
-		ret.RetryPeriod.Duration = 2 * time.Second
+		ret.RetryPeriod.Duration = 10 * time.Second
 	}
 	if len(ret.Namespace) == 0 {
 		if len(defaultNamespace) > 0 {

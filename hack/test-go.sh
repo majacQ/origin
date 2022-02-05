@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # This script runs Go language unit tests for the repository. Arguments to this script
 # are parsed as a list of packages to test until the first argument starting with '-' or '--' is
@@ -33,7 +33,7 @@ os::cleanup::tmpdir
 
 # Internalize environment variables we consume and default if they're not set
 dry_run="${DRY_RUN:-}"
-test_timeout="${TIMEOUT:-120s}"
+test_timeout="${TIMEOUT:-240s}"
 detect_races="${DETECT_RACES:-true}"
 coverage_output_dir="${COVERAGE_OUTPUT_DIR:-}"
 coverage_spec="${COVERAGE_SPEC:--cover -covermode atomic}"

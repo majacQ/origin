@@ -9,7 +9,7 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[Feature:Builds][pullsecret][Conformance] docker build using a pull secret", func() {
+var _ = g.Describe("[sig-builds][Feature:Builds][pullsecret] docker build using a pull secret", func() {
 	defer g.GinkgoRecover()
 	const (
 		buildTestPod     = "build-test-pod"
@@ -18,27 +18,19 @@ var _ = g.Describe("[Feature:Builds][pullsecret][Conformance] docker build using
 
 	var (
 		buildFixture = exutil.FixturePath("testdata", "builds", "test-docker-build-pullsecret.json")
-		oc           = exutil.NewCLI("docker-build-pullsecret", exutil.KubeConfigPath())
+		oc           = exutil.NewCLI("docker-build-pullsecret")
 	)
 
 	g.Context("", func() {
 
 		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
-		})
-
-		g.JustBeforeEach(func() {
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
-			g.By("waiting for builder service account")
-			err = exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "builder")
-			o.Expect(err).NotTo(o.HaveOccurred())
+			exutil.PreTestDump()
 		})
 
 		g.AfterEach(func() {
 			if g.CurrentGinkgoTestDescription().Failed {
 				exutil.DumpPodStates(oc)
+				exutil.DumpConfigMapStates(oc)
 				exutil.DumpPodLogsStartingWith("", oc)
 			}
 		})

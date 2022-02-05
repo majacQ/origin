@@ -1,6 +1,7 @@
 package image_ecosystem
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -16,11 +17,11 @@ import (
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[image_ecosystem][ruby][Slow] hot deploy for openshift ruby image", func() {
+var _ = g.Describe("[sig-devex][Feature:ImageEcosystem][ruby][Slow] hot deploy for openshift ruby image", func() {
 	defer g.GinkgoRecover()
 	var (
-		railsTemplate = "https://raw.githubusercontent.com/openshift/rails-ex/master/openshift/templates/rails-postgresql.json"
-		oc            = exutil.NewCLI("s2i-ruby", exutil.KubeConfigPath())
+		railsTemplate = "rails-postgresql-example"
+		oc            = exutil.NewCLI("s2i-ruby")
 		modifyCommand = []string{"sed", "-ie", `s%render :file => 'public/index.html'%%`, "app/controllers/welcome_controller.rb"}
 		removeCommand = []string{"rm", "-f", "public/index.html"}
 		dcName        = "rails-postgresql-example"
@@ -31,14 +32,8 @@ var _ = g.Describe("[image_ecosystem][ruby][Slow] hot deploy for openshift ruby 
 	)
 
 	g.Context("", func() {
-		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
-			g.By("waiting for builder service account")
-			err = exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "builder")
-			o.Expect(err).NotTo(o.HaveOccurred())
+		g.JustBeforeEach(func() {
+			exutil.PreTestDump()
 		})
 
 		g.AfterEach(func() {
@@ -51,13 +46,13 @@ var _ = g.Describe("[image_ecosystem][ruby][Slow] hot deploy for openshift ruby 
 		g.Describe("Rails example", func() {
 			g.It(fmt.Sprintf("should work with hot deploy"), func() {
 
-				exutil.CheckOpenShiftNamespaceImageStreams(oc)
-				g.By(fmt.Sprintf("calling oc new-app -f %q", railsTemplate))
-				err := oc.Run("new-app").Args("-f", railsTemplate).Execute()
+				exutil.WaitForOpenShiftNamespaceImageStreams(oc)
+				g.By(fmt.Sprintf("calling oc new-app %q", railsTemplate))
+				err := oc.Run("new-app").Args(railsTemplate).Execute()
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for build to finish")
-				err = exutil.WaitForABuild(oc.BuildClient().Build().Builds(oc.Namespace()), rcNameOne, nil, nil, nil)
+				err = exutil.WaitForABuild(oc.BuildClient().BuildV1().Builds(oc.Namespace()), rcNameOne, nil, nil, nil)
 				if err != nil {
 					exutil.DumpBuildLogs(dcName, oc)
 				}
@@ -67,13 +62,13 @@ var _ = g.Describe("[image_ecosystem][ruby][Slow] hot deploy for openshift ruby 
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for endpoint")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
 				o.Expect(err).NotTo(o.HaveOccurred())
-				oldEndpoint, err := oc.KubeFramework().ClientSet.Core().Endpoints(oc.Namespace()).Get(dcName, metav1.GetOptions{})
+				oldEndpoint, err := oc.KubeFramework().ClientSet.CoreV1().Endpoints(oc.Namespace()).Get(context.Background(), dcName, metav1.GetOptions{})
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				assertPageContent := func(content string, dcLabel labels.Selector) {
-					_, err := exutil.WaitForPods(oc.KubeClient().Core().Pods(oc.Namespace()), dcLabel, exutil.CheckPodIsRunning, 1, 4*time.Minute)
+					_, err := exutil.WaitForPods(oc.KubeClient().CoreV1().Pods(oc.Namespace()), dcLabel, exutil.CheckPodIsRunning, 1, 4*time.Minute)
 					o.ExpectWithOffset(1, err).NotTo(o.HaveOccurred())
 
 					result, err := CheckPageContains(oc, dcName, "", content)
@@ -91,7 +86,7 @@ var _ = g.Describe("[image_ecosystem][ruby][Slow] hot deploy for openshift ruby 
 				g.By("testing application content source modification")
 				assertPageContent("Welcome to your Rails application on OpenShift", dcLabelOne)
 
-				pods, err := oc.KubeClient().Core().Pods(oc.Namespace()).List(metav1.ListOptions{LabelSelector: dcLabelOne.String()})
+				pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(context.Background(), metav1.ListOptions{LabelSelector: dcLabelOne.String()})
 				o.Expect(err).NotTo(o.HaveOccurred())
 				o.Expect(len(pods.Items)).To(o.Equal(1))
 
@@ -102,14 +97,14 @@ var _ = g.Describe("[image_ecosystem][ruby][Slow] hot deploy for openshift ruby 
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("waiting for a new endpoint")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), dcName)
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				// Ran into an issue where we'd try to hit the endpoint before it was updated, resulting in
 				// request timeouts against the previous pod's ip.  So make sure the endpoint is pointing to the
 				// new pod before hitting it.
 				err = wait.Poll(1*time.Second, 1*time.Minute, func() (bool, error) {
-					newEndpoint, err := oc.KubeFramework().ClientSet.Core().Endpoints(oc.Namespace()).Get(dcName, metav1.GetOptions{})
+					newEndpoint, err := oc.KubeFramework().ClientSet.CoreV1().Endpoints(oc.Namespace()).Get(context.Background(), dcName, metav1.GetOptions{})
 					if err != nil {
 						return false, err
 					}

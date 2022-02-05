@@ -1,6 +1,7 @@
 package image_ecosystem
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -10,7 +11,6 @@ import (
 	"github.com/openshift/api/template"
 	exutil "github.com/openshift/origin/test/extended/util"
 	"github.com/openshift/origin/test/extended/util/db"
-	testutil "github.com/openshift/origin/test/util"
 
 	//	kapiv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -28,11 +28,11 @@ var (
 )
 
 /*
-var _ = g.Describe("[image_ecosystem][postgresql][Slow][local] openshift postgresql replication", func() {
+var _ = g.Describe("[sig-devex][Feature:ImageEcosystem][postgresql][Slow][Local] openshift postgresql replication", func() {
 	defer g.GinkgoRecover()
 	g.Skip("db replica tests are currently flaky and disabled")
 
-	var oc = exutil.NewCLI("postgresql-replication", exutil.KubeConfigPath())
+	var oc = exutil.NewCLI("postgresql-replication")
 	var pvs = []*kapiv1.PersistentVolume{}
 	var nfspod = &kapiv1.Pod{}
 	var cleanup = func() {
@@ -65,7 +65,7 @@ var _ = g.Describe("[image_ecosystem][postgresql][Slow][local] openshift postgre
 
 	g.Context("", func() {
 		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
+			exutil.PreTestDump()
 
 			g.By("waiting for default service account")
 			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
@@ -119,10 +119,10 @@ func PostgreSQLReplicationTestFactory(oc *exutil.CLI, image string, cleanup func
 		// up prior to the AfterEach processing, to guaranteed deletion order
 		defer cleanup()
 
-		err := testutil.WaitForPolicyUpdate(oc.InternalKubeClient().Authorization(), oc.Namespace(), "create", template.Resource("templates"), true)
+		err := WaitForPolicyUpdate(oc.KubeClient().AuthorizationV1(), oc.Namespace(), "create", template.Resource("templates"), true)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
-		exutil.CheckOpenShiftNamespaceImageStreams(oc)
+		exutil.WaitForOpenShiftNamespaceImageStreams(oc)
 
 		err = oc.Run("create").Args("-f", postgreSQLReplicationTemplate).Execute()
 		o.Expect(err).NotTo(o.HaveOccurred())
@@ -141,7 +141,7 @@ func PostgreSQLReplicationTestFactory(oc *exutil.CLI, image string, cleanup func
 		err = exutil.WaitForDeploymentConfig(oc.KubeClient(), oc.AppsClient().AppsV1(), oc.Namespace(), postgreSQLHelperName, 1, true, oc)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
-		err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), postgreSQLHelperName)
+		err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), postgreSQLHelperName)
 		o.Expect(err).NotTo(o.HaveOccurred())
 
 		tableCounter := 0
@@ -169,7 +169,7 @@ func PostgreSQLReplicationTestFactory(oc *exutil.CLI, image string, cleanup func
 			check(err)
 
 			// Test if we can query as admin
-			err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "postgresql-master")
+			err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "postgresql-master")
 			check(err)
 			err = helper.TestRemoteLogin(oc, "postgresql-master")
 			check(err)
@@ -235,7 +235,7 @@ func PostgreSQLReplicationTestFactory(oc *exutil.CLI, image string, cleanup func
 		o.Expect(err).NotTo(o.HaveOccurred())
 		assertReplicationIsWorking("postgresql-master-2", "postgresql-slave-1", 1)
 
-		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(metav1.ListOptions{LabelSelector: exutil.ParseLabelsOrDie("deployment=postgresql-slave-1").String()})
+		pods, err := oc.KubeClient().CoreV1().Pods(oc.Namespace()).List(context.Background(), metav1.ListOptions{LabelSelector: exutil.ParseLabelsOrDie("deployment=postgresql-slave-1").String()})
 		o.Expect(err).NotTo(o.HaveOccurred())
 		o.Expect(len(pods.Items)).To(o.Equal(1))
 

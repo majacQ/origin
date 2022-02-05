@@ -22,6 +22,7 @@ import (
 	"github.com/Azure/go-autorest/autorest"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"github.com/Azure/go-autorest/autorest/validation"
+	"github.com/Azure/go-autorest/tracing"
 	"net/http"
 )
 
@@ -35,27 +36,41 @@ func NewClient(subscriptionID string) Client {
 	return NewClientWithBaseURI(DefaultBaseURI, subscriptionID)
 }
 
-// NewClientWithBaseURI creates an instance of the Client client.
+// NewClientWithBaseURI creates an instance of the Client client using a custom endpoint.  Use this when interacting
+// with an Azure cloud that uses a non-standard base URI (sovereign clouds, Azure stack).
 func NewClientWithBaseURI(baseURI string, subscriptionID string) Client {
 	return Client{NewWithBaseURI(baseURI, subscriptionID)}
 }
 
 // CheckExistence checks whether a resource exists.
-//
-// resourceGroupName is the name of the resource group containing the resource to check. The name is case
-// insensitive. resourceProviderNamespace is the resource provider of the resource to check. parentResourcePath is
-// the parent resource identity. resourceType is the resource type. resourceName is the name of the resource to
-// check whether it exists.
-func (client Client) CheckExistence(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string) (result autorest.Response, err error) {
+// Parameters:
+// resourceGroupName - the name of the resource group containing the resource to check. The name is case
+// insensitive.
+// resourceProviderNamespace - the resource provider of the resource to check.
+// parentResourcePath - the parent resource identity.
+// resourceType - the resource type.
+// resourceName - the name of the resource to check whether it exists.
+// APIVersion - the API version to use for the operation.
+func (client Client) CheckExistence(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string) (result autorest.Response, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.CheckExistence")
+		defer func() {
+			sc := -1
+			if result.Response != nil {
+				sc = result.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: resourceGroupName,
 			Constraints: []validation.Constraint{{Target: "resourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "resourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}}}); err != nil {
+				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "CheckExistence", err.Error())
 	}
 
-	req, err := client.CheckExistencePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName)
+	req, err := client.CheckExistencePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName, APIVersion)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "CheckExistence", nil, "Failure preparing request")
 		return
@@ -77,7 +92,7 @@ func (client Client) CheckExistence(ctx context.Context, resourceGroupName strin
 }
 
 // CheckExistencePreparer prepares the CheckExistence request.
-func (client Client) CheckExistencePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string) (*http.Request, error) {
+func (client Client) CheckExistencePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"parentResourcePath":        parentResourcePath,
 		"resourceGroupName":         autorest.Encode("path", resourceGroupName),
@@ -87,7 +102,6 @@ func (client Client) CheckExistencePreparer(ctx context.Context, resourceGroupNa
 		"subscriptionId":            autorest.Encode("path", client.SubscriptionID),
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
@@ -103,8 +117,7 @@ func (client Client) CheckExistencePreparer(ctx context.Context, resourceGroupNa
 // CheckExistenceSender sends the CheckExistence request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) CheckExistenceSender(req *http.Request) (*http.Response, error) {
-	return autorest.SendWithSender(client, req,
-		azure.DoRetryWithRegistration(client.Client))
+	return client.Send(req, azure.DoRetryWithRegistration(client.Client))
 }
 
 // CheckExistenceResponder handles the response to the CheckExistence request. The method always
@@ -120,12 +133,23 @@ func (client Client) CheckExistenceResponder(resp *http.Response) (result autore
 }
 
 // CheckExistenceByID checks by ID whether a resource exists.
-//
-// resourceID is the fully qualified ID of the resource, including the resource name and resource type. Use the
+// Parameters:
+// resourceID - the fully qualified ID of the resource, including the resource name and resource type. Use the
 // format,
 // /subscriptions/{guid}/resourceGroups/{resource-group-name}/{resource-provider-namespace}/{resource-type}/{resource-name}
-func (client Client) CheckExistenceByID(ctx context.Context, resourceID string) (result autorest.Response, err error) {
-	req, err := client.CheckExistenceByIDPreparer(ctx, resourceID)
+// APIVersion - the API version to use for the operation.
+func (client Client) CheckExistenceByID(ctx context.Context, resourceID string, APIVersion string) (result autorest.Response, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.CheckExistenceByID")
+		defer func() {
+			sc := -1
+			if result.Response != nil {
+				sc = result.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
+	req, err := client.CheckExistenceByIDPreparer(ctx, resourceID, APIVersion)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "CheckExistenceByID", nil, "Failure preparing request")
 		return
@@ -147,12 +171,11 @@ func (client Client) CheckExistenceByID(ctx context.Context, resourceID string) 
 }
 
 // CheckExistenceByIDPreparer prepares the CheckExistenceByID request.
-func (client Client) CheckExistenceByIDPreparer(ctx context.Context, resourceID string) (*http.Request, error) {
+func (client Client) CheckExistenceByIDPreparer(ctx context.Context, resourceID string, APIVersion string) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"resourceId": resourceID,
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
@@ -168,8 +191,7 @@ func (client Client) CheckExistenceByIDPreparer(ctx context.Context, resourceID 
 // CheckExistenceByIDSender sends the CheckExistenceByID request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) CheckExistenceByIDSender(req *http.Request) (*http.Response, error) {
-	return autorest.SendWithSender(client, req,
-		autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
+	return client.Send(req, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
 }
 
 // CheckExistenceByIDResponder handles the response to the CheckExistenceByID request. The method always
@@ -185,24 +207,37 @@ func (client Client) CheckExistenceByIDResponder(resp *http.Response) (result au
 }
 
 // CreateOrUpdate creates a resource.
-//
-// resourceGroupName is the name of the resource group for the resource. The name is case insensitive.
-// resourceProviderNamespace is the namespace of the resource provider. parentResourcePath is the parent resource
-// identity. resourceType is the resource type of the resource to create. resourceName is the name of the resource
-// to create. parameters is parameters for creating or updating the resource.
-func (client Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, parameters GenericResource) (result CreateOrUpdateFuture, err error) {
+// Parameters:
+// resourceGroupName - the name of the resource group for the resource. The name is case insensitive.
+// resourceProviderNamespace - the namespace of the resource provider.
+// parentResourcePath - the parent resource identity.
+// resourceType - the resource type of the resource to create.
+// resourceName - the name of the resource to create.
+// APIVersion - the API version to use for the operation.
+// parameters - parameters for creating or updating the resource.
+func (client Client) CreateOrUpdate(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string, parameters GenericResource) (result CreateOrUpdateFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.CreateOrUpdate")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: resourceGroupName,
 			Constraints: []validation.Constraint{{Target: "resourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "resourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}},
+				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}},
 		{TargetValue: parameters,
 			Constraints: []validation.Constraint{{Target: "parameters.Kind", Name: validation.Null, Rule: false,
 				Chain: []validation.Constraint{{Target: "parameters.Kind", Name: validation.Pattern, Rule: `^[-\w\._,\(\)]+$`, Chain: nil}}}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "CreateOrUpdate", err.Error())
 	}
 
-	req, err := client.CreateOrUpdatePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName, parameters)
+	req, err := client.CreateOrUpdatePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName, APIVersion, parameters)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "CreateOrUpdate", nil, "Failure preparing request")
 		return
@@ -218,7 +253,7 @@ func (client Client) CreateOrUpdate(ctx context.Context, resourceGroupName strin
 }
 
 // CreateOrUpdatePreparer prepares the CreateOrUpdate request.
-func (client Client) CreateOrUpdatePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, parameters GenericResource) (*http.Request, error) {
+func (client Client) CreateOrUpdatePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string, parameters GenericResource) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"parentResourcePath":        parentResourcePath,
 		"resourceGroupName":         autorest.Encode("path", resourceGroupName),
@@ -228,13 +263,12 @@ func (client Client) CreateOrUpdatePreparer(ctx context.Context, resourceGroupNa
 		"subscriptionId":            autorest.Encode("path", client.SubscriptionID),
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
 
 	preparer := autorest.CreatePreparer(
-		autorest.AsJSON(),
+		autorest.AsContentType("application/json; charset=utf-8"),
 		autorest.AsPut(),
 		autorest.WithBaseURL(client.BaseURI),
 		autorest.WithPathParameters("/subscriptions/{subscriptionId}/resourcegroups/{resourceGroupName}/providers/{resourceProviderNamespace}/{parentResourcePath}/{resourceType}/{resourceName}", pathParameters),
@@ -246,15 +280,12 @@ func (client Client) CreateOrUpdatePreparer(ctx context.Context, resourceGroupNa
 // CreateOrUpdateSender sends the CreateOrUpdate request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) CreateOrUpdateSender(req *http.Request) (future CreateOrUpdateFuture, err error) {
-	sender := autorest.DecorateSender(client, azure.DoRetryWithRegistration(client.Client))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, azure.DoRetryWithRegistration(client.Client))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusCreated, http.StatusAccepted))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 
@@ -272,12 +303,23 @@ func (client Client) CreateOrUpdateResponder(resp *http.Response) (result Generi
 }
 
 // CreateOrUpdateByID create a resource by ID.
-//
-// resourceID is the fully qualified ID of the resource, including the resource name and resource type. Use the
+// Parameters:
+// resourceID - the fully qualified ID of the resource, including the resource name and resource type. Use the
 // format,
 // /subscriptions/{guid}/resourceGroups/{resource-group-name}/{resource-provider-namespace}/{resource-type}/{resource-name}
-// parameters is create or update resource parameters.
-func (client Client) CreateOrUpdateByID(ctx context.Context, resourceID string, parameters GenericResource) (result CreateOrUpdateByIDFuture, err error) {
+// APIVersion - the API version to use for the operation.
+// parameters - create or update resource parameters.
+func (client Client) CreateOrUpdateByID(ctx context.Context, resourceID string, APIVersion string, parameters GenericResource) (result CreateOrUpdateByIDFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.CreateOrUpdateByID")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: parameters,
 			Constraints: []validation.Constraint{{Target: "parameters.Kind", Name: validation.Null, Rule: false,
@@ -285,7 +327,7 @@ func (client Client) CreateOrUpdateByID(ctx context.Context, resourceID string, 
 		return result, validation.NewError("resources.Client", "CreateOrUpdateByID", err.Error())
 	}
 
-	req, err := client.CreateOrUpdateByIDPreparer(ctx, resourceID, parameters)
+	req, err := client.CreateOrUpdateByIDPreparer(ctx, resourceID, APIVersion, parameters)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "CreateOrUpdateByID", nil, "Failure preparing request")
 		return
@@ -301,18 +343,17 @@ func (client Client) CreateOrUpdateByID(ctx context.Context, resourceID string, 
 }
 
 // CreateOrUpdateByIDPreparer prepares the CreateOrUpdateByID request.
-func (client Client) CreateOrUpdateByIDPreparer(ctx context.Context, resourceID string, parameters GenericResource) (*http.Request, error) {
+func (client Client) CreateOrUpdateByIDPreparer(ctx context.Context, resourceID string, APIVersion string, parameters GenericResource) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"resourceId": resourceID,
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
 
 	preparer := autorest.CreatePreparer(
-		autorest.AsJSON(),
+		autorest.AsContentType("application/json; charset=utf-8"),
 		autorest.AsPut(),
 		autorest.WithBaseURL(client.BaseURI),
 		autorest.WithPathParameters("/{resourceId}", pathParameters),
@@ -324,15 +365,12 @@ func (client Client) CreateOrUpdateByIDPreparer(ctx context.Context, resourceID 
 // CreateOrUpdateByIDSender sends the CreateOrUpdateByID request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) CreateOrUpdateByIDSender(req *http.Request) (future CreateOrUpdateByIDFuture, err error) {
-	sender := autorest.DecorateSender(client, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusCreated, http.StatusAccepted))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 
@@ -350,20 +388,34 @@ func (client Client) CreateOrUpdateByIDResponder(resp *http.Response) (result Ge
 }
 
 // Delete deletes a resource.
-//
-// resourceGroupName is the name of the resource group that contains the resource to delete. The name is case
-// insensitive. resourceProviderNamespace is the namespace of the resource provider. parentResourcePath is the
-// parent resource identity. resourceType is the resource type. resourceName is the name of the resource to delete.
-func (client Client) Delete(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string) (result DeleteFuture, err error) {
+// Parameters:
+// resourceGroupName - the name of the resource group that contains the resource to delete. The name is case
+// insensitive.
+// resourceProviderNamespace - the namespace of the resource provider.
+// parentResourcePath - the parent resource identity.
+// resourceType - the resource type.
+// resourceName - the name of the resource to delete.
+// APIVersion - the API version to use for the operation.
+func (client Client) Delete(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string) (result DeleteFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.Delete")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: resourceGroupName,
 			Constraints: []validation.Constraint{{Target: "resourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "resourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}}}); err != nil {
+				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "Delete", err.Error())
 	}
 
-	req, err := client.DeletePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName)
+	req, err := client.DeletePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName, APIVersion)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "Delete", nil, "Failure preparing request")
 		return
@@ -379,7 +431,7 @@ func (client Client) Delete(ctx context.Context, resourceGroupName string, resou
 }
 
 // DeletePreparer prepares the Delete request.
-func (client Client) DeletePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string) (*http.Request, error) {
+func (client Client) DeletePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"parentResourcePath":        parentResourcePath,
 		"resourceGroupName":         autorest.Encode("path", resourceGroupName),
@@ -389,7 +441,6 @@ func (client Client) DeletePreparer(ctx context.Context, resourceGroupName strin
 		"subscriptionId":            autorest.Encode("path", client.SubscriptionID),
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
@@ -405,15 +456,12 @@ func (client Client) DeletePreparer(ctx context.Context, resourceGroupName strin
 // DeleteSender sends the Delete request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) DeleteSender(req *http.Request) (future DeleteFuture, err error) {
-	sender := autorest.DecorateSender(client, azure.DoRetryWithRegistration(client.Client))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, azure.DoRetryWithRegistration(client.Client))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusAccepted, http.StatusNoContent))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 
@@ -430,12 +478,23 @@ func (client Client) DeleteResponder(resp *http.Response) (result autorest.Respo
 }
 
 // DeleteByID deletes a resource by ID.
-//
-// resourceID is the fully qualified ID of the resource, including the resource name and resource type. Use the
+// Parameters:
+// resourceID - the fully qualified ID of the resource, including the resource name and resource type. Use the
 // format,
 // /subscriptions/{guid}/resourceGroups/{resource-group-name}/{resource-provider-namespace}/{resource-type}/{resource-name}
-func (client Client) DeleteByID(ctx context.Context, resourceID string) (result DeleteByIDFuture, err error) {
-	req, err := client.DeleteByIDPreparer(ctx, resourceID)
+// APIVersion - the API version to use for the operation.
+func (client Client) DeleteByID(ctx context.Context, resourceID string, APIVersion string) (result DeleteByIDFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.DeleteByID")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
+	req, err := client.DeleteByIDPreparer(ctx, resourceID, APIVersion)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "DeleteByID", nil, "Failure preparing request")
 		return
@@ -451,12 +510,11 @@ func (client Client) DeleteByID(ctx context.Context, resourceID string) (result 
 }
 
 // DeleteByIDPreparer prepares the DeleteByID request.
-func (client Client) DeleteByIDPreparer(ctx context.Context, resourceID string) (*http.Request, error) {
+func (client Client) DeleteByIDPreparer(ctx context.Context, resourceID string, APIVersion string) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"resourceId": resourceID,
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
@@ -472,15 +530,12 @@ func (client Client) DeleteByIDPreparer(ctx context.Context, resourceID string) 
 // DeleteByIDSender sends the DeleteByID request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) DeleteByIDSender(req *http.Request) (future DeleteByIDFuture, err error) {
-	sender := autorest.DecorateSender(client, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusAccepted, http.StatusNoContent))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 
@@ -497,21 +552,34 @@ func (client Client) DeleteByIDResponder(resp *http.Response) (result autorest.R
 }
 
 // Get gets a resource.
-//
-// resourceGroupName is the name of the resource group containing the resource to get. The name is case
-// insensitive. resourceProviderNamespace is the namespace of the resource provider. parentResourcePath is the
-// parent resource identity. resourceType is the resource type of the resource. resourceName is the name of the
-// resource to get.
-func (client Client) Get(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string) (result GenericResource, err error) {
+// Parameters:
+// resourceGroupName - the name of the resource group containing the resource to get. The name is case
+// insensitive.
+// resourceProviderNamespace - the namespace of the resource provider.
+// parentResourcePath - the parent resource identity.
+// resourceType - the resource type of the resource.
+// resourceName - the name of the resource to get.
+// APIVersion - the API version to use for the operation.
+func (client Client) Get(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string) (result GenericResource, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.Get")
+		defer func() {
+			sc := -1
+			if result.Response.Response != nil {
+				sc = result.Response.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: resourceGroupName,
 			Constraints: []validation.Constraint{{Target: "resourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "resourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}}}); err != nil {
+				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "Get", err.Error())
 	}
 
-	req, err := client.GetPreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName)
+	req, err := client.GetPreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName, APIVersion)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "Get", nil, "Failure preparing request")
 		return
@@ -533,7 +601,7 @@ func (client Client) Get(ctx context.Context, resourceGroupName string, resource
 }
 
 // GetPreparer prepares the Get request.
-func (client Client) GetPreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string) (*http.Request, error) {
+func (client Client) GetPreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"parentResourcePath":        parentResourcePath,
 		"resourceGroupName":         autorest.Encode("path", resourceGroupName),
@@ -543,7 +611,6 @@ func (client Client) GetPreparer(ctx context.Context, resourceGroupName string, 
 		"subscriptionId":            autorest.Encode("path", client.SubscriptionID),
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
@@ -559,8 +626,7 @@ func (client Client) GetPreparer(ctx context.Context, resourceGroupName string, 
 // GetSender sends the Get request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) GetSender(req *http.Request) (*http.Response, error) {
-	return autorest.SendWithSender(client, req,
-		azure.DoRetryWithRegistration(client.Client))
+	return client.Send(req, azure.DoRetryWithRegistration(client.Client))
 }
 
 // GetResponder handles the response to the Get request. The method always
@@ -577,12 +643,23 @@ func (client Client) GetResponder(resp *http.Response) (result GenericResource, 
 }
 
 // GetByID gets a resource by ID.
-//
-// resourceID is the fully qualified ID of the resource, including the resource name and resource type. Use the
+// Parameters:
+// resourceID - the fully qualified ID of the resource, including the resource name and resource type. Use the
 // format,
 // /subscriptions/{guid}/resourceGroups/{resource-group-name}/{resource-provider-namespace}/{resource-type}/{resource-name}
-func (client Client) GetByID(ctx context.Context, resourceID string) (result GenericResource, err error) {
-	req, err := client.GetByIDPreparer(ctx, resourceID)
+// APIVersion - the API version to use for the operation.
+func (client Client) GetByID(ctx context.Context, resourceID string, APIVersion string) (result GenericResource, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.GetByID")
+		defer func() {
+			sc := -1
+			if result.Response.Response != nil {
+				sc = result.Response.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
+	req, err := client.GetByIDPreparer(ctx, resourceID, APIVersion)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "GetByID", nil, "Failure preparing request")
 		return
@@ -604,12 +681,11 @@ func (client Client) GetByID(ctx context.Context, resourceID string) (result Gen
 }
 
 // GetByIDPreparer prepares the GetByID request.
-func (client Client) GetByIDPreparer(ctx context.Context, resourceID string) (*http.Request, error) {
+func (client Client) GetByIDPreparer(ctx context.Context, resourceID string, APIVersion string) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"resourceId": resourceID,
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
@@ -625,8 +701,7 @@ func (client Client) GetByIDPreparer(ctx context.Context, resourceID string) (*h
 // GetByIDSender sends the GetByID request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) GetByIDSender(req *http.Request) (*http.Response, error) {
-	return autorest.SendWithSender(client, req,
-		autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
+	return client.Send(req, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
 }
 
 // GetByIDResponder handles the response to the GetByID request. The method always
@@ -643,10 +718,22 @@ func (client Client) GetByIDResponder(resp *http.Response) (result GenericResour
 }
 
 // List get all the resources in a subscription.
-//
-// filter is the filter to apply on the operation. expand is the $expand query parameter. top is the number of
-// results to return. If null is passed, returns all resource groups.
+// Parameters:
+// filter - the filter to apply on the operation.
+// expand - comma-separated list of additional properties to be included in the response. Valid values include
+// `createdTime`, `changedTime` and `provisioningState`. For example, `$expand=createdTime,changedTime`.
+// top - the number of results to return. If null is passed, returns all resource groups.
 func (client Client) List(ctx context.Context, filter string, expand string, top *int32) (result ListResultPage, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.List")
+		defer func() {
+			sc := -1
+			if result.lr.Response.Response != nil {
+				sc = result.lr.Response.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	result.fn = client.listNextResults
 	req, err := client.ListPreparer(ctx, filter, expand, top)
 	if err != nil {
@@ -700,8 +787,7 @@ func (client Client) ListPreparer(ctx context.Context, filter string, expand str
 // ListSender sends the List request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) ListSender(req *http.Request) (*http.Response, error) {
-	return autorest.SendWithSender(client, req,
-		azure.DoRetryWithRegistration(client.Client))
+	return client.Send(req, azure.DoRetryWithRegistration(client.Client))
 }
 
 // ListResponder handles the response to the List request. The method always
@@ -718,8 +804,8 @@ func (client Client) ListResponder(resp *http.Response) (result ListResult, err 
 }
 
 // listNextResults retrieves the next set of results, if any.
-func (client Client) listNextResults(lastResults ListResult) (result ListResult, err error) {
-	req, err := lastResults.listResultPreparer()
+func (client Client) listNextResults(ctx context.Context, lastResults ListResult) (result ListResult, err error) {
+	req, err := lastResults.listResultPreparer(ctx)
 	if err != nil {
 		return result, autorest.NewErrorWithError(err, "resources.Client", "listNextResults", nil, "Failure preparing next results request")
 	}
@@ -740,21 +826,43 @@ func (client Client) listNextResults(lastResults ListResult) (result ListResult,
 
 // ListComplete enumerates all values, automatically crossing page boundaries as required.
 func (client Client) ListComplete(ctx context.Context, filter string, expand string, top *int32) (result ListResultIterator, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.List")
+		defer func() {
+			sc := -1
+			if result.Response().Response.Response != nil {
+				sc = result.page.Response().Response.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	result.page, err = client.List(ctx, filter, expand, top)
 	return
 }
 
 // ListByResourceGroup get all the resources for a resource group.
-//
-// resourceGroupName is the resource group with the resources to get. filter is the filter to apply on the
-// operation. expand is the $expand query parameter top is the number of results to return. If null is passed,
-// returns all resources.
+// Parameters:
+// resourceGroupName - the resource group with the resources to get.
+// filter - the filter to apply on the operation.
+// expand - comma-separated list of additional properties to be included in the response. Valid values include
+// `createdTime`, `changedTime` and `provisioningState`. For example, `$expand=createdTime,changedTime`.
+// top - the number of results to return. If null is passed, returns all resources.
 func (client Client) ListByResourceGroup(ctx context.Context, resourceGroupName string, filter string, expand string, top *int32) (result ListResultPage, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.ListByResourceGroup")
+		defer func() {
+			sc := -1
+			if result.lr.Response.Response != nil {
+				sc = result.lr.Response.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: resourceGroupName,
 			Constraints: []validation.Constraint{{Target: "resourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "resourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}}}); err != nil {
+				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "ListByResourceGroup", err.Error())
 	}
 
@@ -812,8 +920,7 @@ func (client Client) ListByResourceGroupPreparer(ctx context.Context, resourceGr
 // ListByResourceGroupSender sends the ListByResourceGroup request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) ListByResourceGroupSender(req *http.Request) (*http.Response, error) {
-	return autorest.SendWithSender(client, req,
-		azure.DoRetryWithRegistration(client.Client))
+	return client.Send(req, azure.DoRetryWithRegistration(client.Client))
 }
 
 // ListByResourceGroupResponder handles the response to the ListByResourceGroup request. The method always
@@ -830,8 +937,8 @@ func (client Client) ListByResourceGroupResponder(resp *http.Response) (result L
 }
 
 // listByResourceGroupNextResults retrieves the next set of results, if any.
-func (client Client) listByResourceGroupNextResults(lastResults ListResult) (result ListResult, err error) {
-	req, err := lastResults.listResultPreparer()
+func (client Client) listByResourceGroupNextResults(ctx context.Context, lastResults ListResult) (result ListResult, err error) {
+	req, err := lastResults.listResultPreparer(ctx)
 	if err != nil {
 		return result, autorest.NewErrorWithError(err, "resources.Client", "listByResourceGroupNextResults", nil, "Failure preparing next results request")
 	}
@@ -852,6 +959,16 @@ func (client Client) listByResourceGroupNextResults(lastResults ListResult) (res
 
 // ListByResourceGroupComplete enumerates all values, automatically crossing page boundaries as required.
 func (client Client) ListByResourceGroupComplete(ctx context.Context, resourceGroupName string, filter string, expand string, top *int32) (result ListResultIterator, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.ListByResourceGroup")
+		defer func() {
+			sc := -1
+			if result.Response().Response.Response != nil {
+				sc = result.page.Response().Response.Response.StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	result.page, err = client.ListByResourceGroup(ctx, resourceGroupName, filter, expand, top)
 	return
 }
@@ -859,15 +976,25 @@ func (client Client) ListByResourceGroupComplete(ctx context.Context, resourceGr
 // MoveResources the resources to move must be in the same source resource group. The target resource group may be in a
 // different subscription. When moving resources, both the source group and the target group are locked for the
 // duration of the operation. Write and delete operations are blocked on the groups until the move completes.
-//
-// sourceResourceGroupName is the name of the resource group containing the resources to move. parameters is
-// parameters for moving resources.
+// Parameters:
+// sourceResourceGroupName - the name of the resource group containing the resources to move.
+// parameters - parameters for moving resources.
 func (client Client) MoveResources(ctx context.Context, sourceResourceGroupName string, parameters MoveInfo) (result MoveResourcesFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.MoveResources")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: sourceResourceGroupName,
 			Constraints: []validation.Constraint{{Target: "sourceResourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "sourceResourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "sourceResourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}}}); err != nil {
+				{Target: "sourceResourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "MoveResources", err.Error())
 	}
 
@@ -899,7 +1026,7 @@ func (client Client) MoveResourcesPreparer(ctx context.Context, sourceResourceGr
 	}
 
 	preparer := autorest.CreatePreparer(
-		autorest.AsJSON(),
+		autorest.AsContentType("application/json; charset=utf-8"),
 		autorest.AsPost(),
 		autorest.WithBaseURL(client.BaseURI),
 		autorest.WithPathParameters("/subscriptions/{subscriptionId}/resourceGroups/{sourceResourceGroupName}/moveResources", pathParameters),
@@ -911,15 +1038,12 @@ func (client Client) MoveResourcesPreparer(ctx context.Context, sourceResourceGr
 // MoveResourcesSender sends the MoveResources request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) MoveResourcesSender(req *http.Request) (future MoveResourcesFuture, err error) {
-	sender := autorest.DecorateSender(client, azure.DoRetryWithRegistration(client.Client))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, azure.DoRetryWithRegistration(client.Client))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusAccepted, http.StatusNoContent))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 
@@ -936,21 +1060,34 @@ func (client Client) MoveResourcesResponder(resp *http.Response) (result autores
 }
 
 // Update updates a resource.
-//
-// resourceGroupName is the name of the resource group for the resource. The name is case insensitive.
-// resourceProviderNamespace is the namespace of the resource provider. parentResourcePath is the parent resource
-// identity. resourceType is the resource type of the resource to update. resourceName is the name of the resource
-// to update. parameters is parameters for updating the resource.
-func (client Client) Update(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, parameters GenericResource) (result UpdateFuture, err error) {
+// Parameters:
+// resourceGroupName - the name of the resource group for the resource. The name is case insensitive.
+// resourceProviderNamespace - the namespace of the resource provider.
+// parentResourcePath - the parent resource identity.
+// resourceType - the resource type of the resource to update.
+// resourceName - the name of the resource to update.
+// APIVersion - the API version to use for the operation.
+// parameters - parameters for updating the resource.
+func (client Client) Update(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string, parameters GenericResource) (result UpdateFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.Update")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: resourceGroupName,
 			Constraints: []validation.Constraint{{Target: "resourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "resourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}}}); err != nil {
+				{Target: "resourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "Update", err.Error())
 	}
 
-	req, err := client.UpdatePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName, parameters)
+	req, err := client.UpdatePreparer(ctx, resourceGroupName, resourceProviderNamespace, parentResourcePath, resourceType, resourceName, APIVersion, parameters)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "Update", nil, "Failure preparing request")
 		return
@@ -966,7 +1103,7 @@ func (client Client) Update(ctx context.Context, resourceGroupName string, resou
 }
 
 // UpdatePreparer prepares the Update request.
-func (client Client) UpdatePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, parameters GenericResource) (*http.Request, error) {
+func (client Client) UpdatePreparer(ctx context.Context, resourceGroupName string, resourceProviderNamespace string, parentResourcePath string, resourceType string, resourceName string, APIVersion string, parameters GenericResource) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"parentResourcePath":        parentResourcePath,
 		"resourceGroupName":         autorest.Encode("path", resourceGroupName),
@@ -976,13 +1113,12 @@ func (client Client) UpdatePreparer(ctx context.Context, resourceGroupName strin
 		"subscriptionId":            autorest.Encode("path", client.SubscriptionID),
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
 
 	preparer := autorest.CreatePreparer(
-		autorest.AsJSON(),
+		autorest.AsContentType("application/json; charset=utf-8"),
 		autorest.AsPatch(),
 		autorest.WithBaseURL(client.BaseURI),
 		autorest.WithPathParameters("/subscriptions/{subscriptionId}/resourcegroups/{resourceGroupName}/providers/{resourceProviderNamespace}/{parentResourcePath}/{resourceType}/{resourceName}", pathParameters),
@@ -994,15 +1130,12 @@ func (client Client) UpdatePreparer(ctx context.Context, resourceGroupName strin
 // UpdateSender sends the Update request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) UpdateSender(req *http.Request) (future UpdateFuture, err error) {
-	sender := autorest.DecorateSender(client, azure.DoRetryWithRegistration(client.Client))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, azure.DoRetryWithRegistration(client.Client))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusAccepted))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 
@@ -1020,13 +1153,24 @@ func (client Client) UpdateResponder(resp *http.Response) (result GenericResourc
 }
 
 // UpdateByID updates a resource by ID.
-//
-// resourceID is the fully qualified ID of the resource, including the resource name and resource type. Use the
+// Parameters:
+// resourceID - the fully qualified ID of the resource, including the resource name and resource type. Use the
 // format,
 // /subscriptions/{guid}/resourceGroups/{resource-group-name}/{resource-provider-namespace}/{resource-type}/{resource-name}
-// parameters is update resource parameters.
-func (client Client) UpdateByID(ctx context.Context, resourceID string, parameters GenericResource) (result UpdateByIDFuture, err error) {
-	req, err := client.UpdateByIDPreparer(ctx, resourceID, parameters)
+// APIVersion - the API version to use for the operation.
+// parameters - update resource parameters.
+func (client Client) UpdateByID(ctx context.Context, resourceID string, APIVersion string, parameters GenericResource) (result UpdateByIDFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.UpdateByID")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
+	req, err := client.UpdateByIDPreparer(ctx, resourceID, APIVersion, parameters)
 	if err != nil {
 		err = autorest.NewErrorWithError(err, "resources.Client", "UpdateByID", nil, "Failure preparing request")
 		return
@@ -1042,18 +1186,17 @@ func (client Client) UpdateByID(ctx context.Context, resourceID string, paramete
 }
 
 // UpdateByIDPreparer prepares the UpdateByID request.
-func (client Client) UpdateByIDPreparer(ctx context.Context, resourceID string, parameters GenericResource) (*http.Request, error) {
+func (client Client) UpdateByIDPreparer(ctx context.Context, resourceID string, APIVersion string, parameters GenericResource) (*http.Request, error) {
 	pathParameters := map[string]interface{}{
 		"resourceId": resourceID,
 	}
 
-	const APIVersion = "2017-05-10"
 	queryParameters := map[string]interface{}{
 		"api-version": APIVersion,
 	}
 
 	preparer := autorest.CreatePreparer(
-		autorest.AsJSON(),
+		autorest.AsContentType("application/json; charset=utf-8"),
 		autorest.AsPatch(),
 		autorest.WithBaseURL(client.BaseURI),
 		autorest.WithPathParameters("/{resourceId}", pathParameters),
@@ -1065,15 +1208,12 @@ func (client Client) UpdateByIDPreparer(ctx context.Context, resourceID string, 
 // UpdateByIDSender sends the UpdateByID request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) UpdateByIDSender(req *http.Request) (future UpdateByIDFuture, err error) {
-	sender := autorest.DecorateSender(client, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, autorest.DoRetryForStatusCodes(client.RetryAttempts, client.RetryDuration, autorest.StatusCodesForRetry...))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusAccepted))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 
@@ -1095,15 +1235,25 @@ func (client Client) UpdateByIDResponder(resp *http.Response) (result GenericRes
 // subscription. If validation succeeds, it returns HTTP response code 204 (no content). If validation fails, it
 // returns HTTP response code 409 (Conflict) with an error message. Retrieve the URL in the Location header value to
 // check the result of the long-running operation.
-//
-// sourceResourceGroupName is the name of the resource group containing the resources to validate for move.
-// parameters is parameters for moving resources.
+// Parameters:
+// sourceResourceGroupName - the name of the resource group containing the resources to validate for move.
+// parameters - parameters for moving resources.
 func (client Client) ValidateMoveResources(ctx context.Context, sourceResourceGroupName string, parameters MoveInfo) (result ValidateMoveResourcesFuture, err error) {
+	if tracing.IsEnabled() {
+		ctx = tracing.StartSpan(ctx, fqdn+"/Client.ValidateMoveResources")
+		defer func() {
+			sc := -1
+			if result.Response() != nil {
+				sc = result.Response().StatusCode
+			}
+			tracing.EndSpan(ctx, sc, err)
+		}()
+	}
 	if err := validation.Validate([]validation.Validation{
 		{TargetValue: sourceResourceGroupName,
 			Constraints: []validation.Constraint{{Target: "sourceResourceGroupName", Name: validation.MaxLength, Rule: 90, Chain: nil},
 				{Target: "sourceResourceGroupName", Name: validation.MinLength, Rule: 1, Chain: nil},
-				{Target: "sourceResourceGroupName", Name: validation.Pattern, Rule: `^[-\w\._\(\)]+$`, Chain: nil}}}}); err != nil {
+				{Target: "sourceResourceGroupName", Name: validation.Pattern, Rule: `^[-\p{L}\._\(\)\w]+$`, Chain: nil}}}}); err != nil {
 		return result, validation.NewError("resources.Client", "ValidateMoveResources", err.Error())
 	}
 
@@ -1135,7 +1285,7 @@ func (client Client) ValidateMoveResourcesPreparer(ctx context.Context, sourceRe
 	}
 
 	preparer := autorest.CreatePreparer(
-		autorest.AsJSON(),
+		autorest.AsContentType("application/json; charset=utf-8"),
 		autorest.AsPost(),
 		autorest.WithBaseURL(client.BaseURI),
 		autorest.WithPathParameters("/subscriptions/{subscriptionId}/resourceGroups/{sourceResourceGroupName}/validateMoveResources", pathParameters),
@@ -1147,15 +1297,12 @@ func (client Client) ValidateMoveResourcesPreparer(ctx context.Context, sourceRe
 // ValidateMoveResourcesSender sends the ValidateMoveResources request. The method will close the
 // http.Response Body if it receives an error.
 func (client Client) ValidateMoveResourcesSender(req *http.Request) (future ValidateMoveResourcesFuture, err error) {
-	sender := autorest.DecorateSender(client, azure.DoRetryWithRegistration(client.Client))
-	future.Future = azure.NewFuture(req)
-	future.req = req
-	_, err = future.Done(sender)
+	var resp *http.Response
+	resp, err = client.Send(req, azure.DoRetryWithRegistration(client.Client))
 	if err != nil {
 		return
 	}
-	err = autorest.Respond(future.Response(),
-		azure.WithErrorUnlessStatusCode(http.StatusOK, http.StatusAccepted, http.StatusNoContent, http.StatusConflict))
+	future.Future, err = azure.NewFutureFromResponse(resp)
 	return
 }
 

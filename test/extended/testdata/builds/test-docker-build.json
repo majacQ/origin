@@ -10,18 +10,17 @@
   "spec":{
     "triggers":[],
     "source":{
-      "type":"Git",
-      "git":{
-        "uri":"https://github.com/sclorg/s2i-ruby-container"
+      "git": {
+        "uri":"https://github.com/sclorg/nodejs-ex"        
       },
-      "contextDir":"2.3"
+      "dockerfile": "FROM image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
     },
     "strategy":{
       "type":"Docker",
       "dockerStrategy":{
         "from":{
           "kind":"DockerImage",
-          "name":"centos/s2i-base-centos7"
+          "name":"image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
         }
       }
     },

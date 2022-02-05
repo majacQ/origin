@@ -5,24 +5,20 @@ import (
 
 	g "github.com/onsi/ginkgo"
 	o "github.com/onsi/gomega"
-	e2e "k8s.io/kubernetes/test/e2e/framework"
 
 	exutil "github.com/openshift/origin/test/extended/util"
 )
 
-var _ = g.Describe("[image_ecosystem][mysql][Slow] openshift mysql image", func() {
+var _ = g.Describe("[sig-devex][Feature:ImageEcosystem][mysql][Slow] openshift mysql image", func() {
 	defer g.GinkgoRecover()
 	var (
-		templatePath = exutil.FixturePath("..", "..", "examples", "db-templates", "mysql-ephemeral-template.json")
-		oc           = exutil.NewCLI("mysql-create", exutil.KubeConfigPath())
+		templatePath = "mysql-ephemeral"
+		oc           = exutil.NewCLI("mysql-create")
 	)
 
 	g.Context("", func() {
 		g.BeforeEach(func() {
-			exutil.DumpDockerInfo()
-			g.By("waiting for default service account")
-			err := exutil.WaitForServiceAccount(oc.KubeClient().Core().ServiceAccounts(oc.Namespace()), "default")
-			o.Expect(err).NotTo(o.HaveOccurred())
+			exutil.PreTestDump()
 		})
 
 		g.AfterEach(func() {
@@ -35,8 +31,8 @@ var _ = g.Describe("[image_ecosystem][mysql][Slow] openshift mysql image", func(
 		g.Describe("Creating from a template", func() {
 			g.It(fmt.Sprintf("should instantiate the template"), func() {
 
-				g.By(fmt.Sprintf("calling oc process -f %q", templatePath))
-				configFile, err := oc.Run("process").Args("-f", templatePath).OutputToFile("config.json")
+				g.By(fmt.Sprintf("calling oc process %q", templatePath))
+				configFile, err := oc.Run("process").Args("openshift//" + templatePath).OutputToFile("config.json")
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By(fmt.Sprintf("calling oc create -f %q", configFile))
@@ -49,7 +45,7 @@ var _ = g.Describe("[image_ecosystem][mysql][Slow] openshift mysql image", func(
 				o.Expect(err).NotTo(o.HaveOccurred())
 
 				g.By("expecting the mysql service get endpoints")
-				err = e2e.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mysql")
+				err = exutil.WaitForEndpoint(oc.KubeFramework().ClientSet, oc.Namespace(), "mysql")
 				o.Expect(err).NotTo(o.HaveOccurred())
 			})
 		})

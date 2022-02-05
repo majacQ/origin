@@ -19,6 +19,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"time"
 
 	authenticationapiv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -26,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apiserver/pkg/authentication/authenticator"
 	genericapirequest "k8s.io/apiserver/pkg/endpoints/request"
 	"k8s.io/apiserver/pkg/registry/rest"
 	authenticationapi "k8s.io/kubernetes/pkg/apis/authentication"
@@ -39,11 +41,13 @@ func (r *TokenREST) New() runtime.Object {
 }
 
 type TokenREST struct {
-	svcaccts getter
-	pods     getter
-	secrets  getter
-	issuer   token.TokenGenerator
-	auds     []string
+	svcaccts             getter
+	pods                 getter
+	secrets              getter
+	issuer               token.TokenGenerator
+	auds                 authenticator.Audiences
+	maxExpirationSeconds int64
+	extendExpiration     bool
 }
 
 var _ = rest.NamedCreater(&TokenREST{})
@@ -55,9 +59,11 @@ var gvk = schema.GroupVersionKind{
 	Kind:    "TokenRequest",
 }
 
-func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object, createValidation rest.ValidateObjectFunc, includeUninitialized bool) (runtime.Object, error) {
-	if err := createValidation(obj); err != nil {
-		return nil, err
+func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object, createValidation rest.ValidateObjectFunc, options *metav1.CreateOptions) (runtime.Object, error) {
+	if createValidation != nil {
+		if err := createValidation(ctx, obj.DeepCopyObject()); err != nil {
+			return nil, err
+		}
 	}
 
 	out := obj.(*authenticationapi.TokenRequest)
@@ -111,7 +117,27 @@ func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object,
 	if len(out.Spec.Audiences) == 0 {
 		out.Spec.Audiences = r.auds
 	}
-	sc, pc := token.Claims(*svcacct, pod, secret, out.Spec.ExpirationSeconds, out.Spec.Audiences)
+
+	if r.maxExpirationSeconds > 0 && out.Spec.ExpirationSeconds > r.maxExpirationSeconds {
+		//only positive value is valid
+		out.Spec.ExpirationSeconds = r.maxExpirationSeconds
+	}
+
+	// Tweak expiration for safe transition of projected service account token.
+	// Warn (instead of fail) after requested expiration time.
+	// Fail after hard-coded extended expiration time.
+	// Only perform the extension when token is pod-bound.
+	var warnAfter int64
+	exp := out.Spec.ExpirationSeconds
+	if r.extendExpiration && pod != nil && out.Spec.ExpirationSeconds == token.WarnOnlyBoundTokenExpirationSeconds {
+		warnAfter = exp
+		exp = token.ExpirationExtensionSeconds
+	}
+
+	// Save current time before building the token, to make sure the expiration
+	// returned in TokenRequestStatus would be earlier than exp field in token.
+	nowTime := time.Now()
+	sc, pc := token.Claims(*svcacct, pod, secret, exp, warnAfter, out.Spec.Audiences)
 	tokdata, err := r.issuer.GenerateToken(sc, pc)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate token: %v", err)
@@ -119,7 +145,7 @@ func (r *TokenREST) Create(ctx context.Context, name string, obj runtime.Object,
 
 	out.Status = authenticationapi.TokenRequestStatus{
 		Token:               tokdata,
-		ExpirationTimestamp: metav1.Time{Time: sc.Expiry.Time()},
+		ExpirationTimestamp: metav1.Time{Time: nowTime.Add(time.Duration(out.Spec.ExpirationSeconds) * time.Second)},
 	}
 	return out, nil
 }

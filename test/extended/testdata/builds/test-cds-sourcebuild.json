@@ -25,14 +25,14 @@
         "triggers": [],
         "source":{
           "type":"Dockerfile",
-          "dockerfile":"FROM centos:7\nRUN sleep 10m"
+          "dockerfile":"FROM image-registry.openshift-image-registry.svc:5000/openshift/tools:latest \nRUN sleep 10m"
         },
         "strategy": {
           "type": "Source",
           "sourceStrategy": {
             "from": {
               "kind": "DockerImage",
-              "name": "centos/ruby-22-centos7"
+              "name": "image-registry.openshift-image-registry.svc:5000/openshift/tools:latest"
             }
           }
         }

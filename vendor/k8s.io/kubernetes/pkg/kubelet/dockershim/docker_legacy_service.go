@@ -1,3 +1,5 @@
+// +build !dockerless
+
 /*
 Copyright 2016 The Kubernetes Authors.
 
@@ -17,6 +19,8 @@ limitations under the License.
 package dockershim
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -28,29 +32,22 @@ import (
 	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	kubetypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
-	"k8s.io/kubernetes/pkg/kubelet/kuberuntime"
 
 	"k8s.io/kubernetes/pkg/kubelet/dockershim/libdocker"
 )
 
-// DockerLegacyService interface embeds some legacy methods for backward compatibility.
-// This file/interface will be removed in the near future. Do not modify or add
-// more functions.
-type DockerLegacyService interface {
-	// GetContainerLogs gets logs for a specific container.
-	GetContainerLogs(*v1.Pod, kubecontainer.ContainerID, *v1.PodLogOptions, io.Writer, io.Writer) error
-
-	// IsCRISupportedLogDriver checks whether the logging driver used by docker is
-	// supported by native CRI integration.
-	// TODO(resouer): remove this when deprecating unsupported log driver
-	IsCRISupportedLogDriver() (bool, error)
-
-	kuberuntime.LegacyLogProvider
-}
+// We define `DockerLegacyService` in `pkg/kubelet/legacy`, instead of in this
+// file. We make this decision because `pkg/kubelet` depends on
+// `DockerLegacyService`, and we want to be able to build the `kubelet` without
+// relying on `github.com/docker/docker` or `pkg/kubelet/dockershim`.
+//
+// See https://github.com/kubernetes/enhancements/blob/master/keps/sig-node/20200205-build-kubelet-without-docker.md
+// for details.
 
 // GetContainerLogs get container logs directly from docker daemon.
-func (d *dockerService) GetContainerLogs(pod *v1.Pod, containerID kubecontainer.ContainerID, logOptions *v1.PodLogOptions, stdout, stderr io.Writer) error {
+func (d *dockerService) GetContainerLogs(_ context.Context, pod *v1.Pod, containerID kubecontainer.ContainerID, logOptions *v1.PodLogOptions, stdout, stderr io.Writer) error {
 	container, err := d.client.InspectContainer(containerID.ID)
 	if err != nil {
 		return err
@@ -75,12 +72,23 @@ func (d *dockerService) GetContainerLogs(pod *v1.Pod, containerID kubecontainer.
 		opts.Tail = strconv.FormatInt(*logOptions.TailLines, 10)
 	}
 
+	if logOptions.LimitBytes != nil {
+		// stdout and stderr share the total write limit
+		max := *logOptions.LimitBytes
+		stderr = sharedLimitWriter(stderr, &max)
+		stdout = sharedLimitWriter(stdout, &max)
+	}
 	sopts := libdocker.StreamOptions{
 		OutputStream: stdout,
 		ErrorStream:  stderr,
 		RawTerminal:  container.Config.Tty,
 	}
-	return d.client.Logs(containerID.ID, opts, sopts)
+	err = d.client.Logs(containerID.ID, opts, sopts)
+	if errors.Is(err, errMaximumWrite) {
+		klog.V(2).Infof("finished logs, hit byte limit %d", *logOptions.LimitBytes)
+		err = nil
+	}
+	return err
 }
 
 // GetContainerLogTail attempts to read up to MaxContainerTerminationMessageLogLength
@@ -97,7 +105,7 @@ func (d *dockerService) GetContainerLogTail(uid kubetypes.UID, name, namespace s
 			Namespace: namespace,
 		},
 	}
-	err := d.GetContainerLogs(pod, containerId, &v1.PodLogOptions{TailLines: &value}, buf, buf)
+	err := d.GetContainerLogs(context.Background(), pod, containerId, &v1.PodLogOptions{TailLines: &value}, buf, buf)
 	if err != nil {
 		return "", err
 	}
