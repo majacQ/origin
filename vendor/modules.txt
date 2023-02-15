@@ -894,7 +894,7 @@ github.com/pmezard/go-difflib/difflib
 ## explicit
 github.com/pquerna/cachecontrol
 github.com/pquerna/cachecontrol/cacheobject
-# github.com/prometheus/client_golang v1.11.0
+# github.com/prometheus/client_golang v1.11.1
 ## explicit
 github.com/prometheus/client_golang/api
 github.com/prometheus/client_golang/api/prometheus/v1
