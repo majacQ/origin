@@ -38,7 +38,7 @@ require (
 	github.com/openshift/library-go v0.0.0-20220111125907-7f25b9c7ad22
 	github.com/pborman/uuid v1.2.0
 	github.com/pquerna/cachecontrol v0.0.0-20201205024021-ac21108117ac // indirect
-	github.com/prometheus/client_golang v1.11.0
+	github.com/prometheus/client_golang v1.11.1
 	github.com/prometheus/client_model v0.2.0
 	github.com/prometheus/common v0.28.0
 	github.com/spf13/cobra v1.2.1
